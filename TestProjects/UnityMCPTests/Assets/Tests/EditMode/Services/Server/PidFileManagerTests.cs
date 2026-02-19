@@ -2,6 +2,7 @@ using System.IO;
 using NUnit.Framework;
 using MCPForUnity.Editor.Services.Server;
 using MCPForUnity.Editor.Constants;
+using MCPForUnity.Editor.Helpers;
 using UnityEditor;
 using UnityEngine;
 
@@ -38,12 +39,21 @@ namespace MCPForUnityTests.Editor.Services.Server
 
         private void ClearTestEditorPrefs()
         {
+            // Clear legacy global keys
             try { EditorPrefs.DeleteKey(EditorPrefKeys.LastLocalHttpServerPid); } catch { }
             try { EditorPrefs.DeleteKey(EditorPrefKeys.LastLocalHttpServerPort); } catch { }
             try { EditorPrefs.DeleteKey(EditorPrefKeys.LastLocalHttpServerStartedUtc); } catch { }
             try { EditorPrefs.DeleteKey(EditorPrefKeys.LastLocalHttpServerPidArgsHash); } catch { }
             try { EditorPrefs.DeleteKey(EditorPrefKeys.LastLocalHttpServerPidFilePath); } catch { }
             try { EditorPrefs.DeleteKey(EditorPrefKeys.LastLocalHttpServerInstanceToken); } catch { }
+
+            // Clear project-scoped keys
+            try { EditorPrefs.DeleteKey(ProjectIdentityUtility.GetProjectScopedKey(EditorPrefKeys.LastLocalHttpServerPid)); } catch { }
+            try { EditorPrefs.DeleteKey(ProjectIdentityUtility.GetProjectScopedKey(EditorPrefKeys.LastLocalHttpServerPort)); } catch { }
+            try { EditorPrefs.DeleteKey(ProjectIdentityUtility.GetProjectScopedKey(EditorPrefKeys.LastLocalHttpServerStartedUtc)); } catch { }
+            try { EditorPrefs.DeleteKey(ProjectIdentityUtility.GetProjectScopedKey(EditorPrefKeys.LastLocalHttpServerPidArgsHash)); } catch { }
+            try { EditorPrefs.DeleteKey(ProjectIdentityUtility.GetProjectScopedKey(EditorPrefKeys.LastLocalHttpServerPidFilePath)); } catch { }
+            try { EditorPrefs.DeleteKey(ProjectIdentityUtility.GetProjectScopedKey(EditorPrefKeys.LastLocalHttpServerInstanceToken)); } catch { }
         }
 
         #region GetPidFilePath Tests

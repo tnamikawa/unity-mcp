@@ -76,6 +76,15 @@ namespace MCPForUnity.Editor.Helpers
         }
 
         /// <summary>
+        /// Returns a project-scoped EditorPrefs key by appending the project hash.
+        /// Use this to ensure EditorPrefs values are isolated per project.
+        /// </summary>
+        public static string GetProjectScopedKey(string baseKey)
+        {
+            return $"{baseKey}_{GetProjectHash()}";
+        }
+
+        /// <summary>
         /// Returns a human friendly project name derived from the Assets directory path,
         /// or "Unknown" if the name cannot be determined.
         /// </summary>

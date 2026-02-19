@@ -51,7 +51,8 @@ namespace MCPForUnity.Editor.Helpers
         /// </summary>
         public static string GetLocalBaseUrl()
         {
-            string stored = EditorPrefs.GetString(LocalPrefKey, DefaultLocalBaseUrl);
+            string scopedKey = ProjectIdentityUtility.GetProjectScopedKey(LocalPrefKey);
+            string stored = EditorPrefs.GetString(scopedKey, DefaultLocalBaseUrl);
             return NormalizeBaseUrl(stored, DefaultLocalBaseUrl, remoteScope: false);
         }
 
@@ -61,7 +62,8 @@ namespace MCPForUnity.Editor.Helpers
         public static void SaveLocalBaseUrl(string userValue)
         {
             string normalized = NormalizeBaseUrl(userValue, DefaultLocalBaseUrl, remoteScope: false);
-            EditorPrefs.SetString(LocalPrefKey, normalized);
+            string scopedKey = ProjectIdentityUtility.GetProjectScopedKey(LocalPrefKey);
+            EditorPrefs.SetString(scopedKey, normalized);
         }
 
         /// <summary>
