@@ -19,6 +19,13 @@ from starlette.routing import WebSocketRoute
 from starlette.responses import JSONResponse
 import argparse
 import asyncio
+
+# Fix to IPV4 Connection Issue #853
+# Will disable features in ProactorEventLoop including subprocess pipes and named pipes
+import sys
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import logging
 from contextlib import asynccontextmanager
 import os
@@ -162,7 +169,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     if _plugin_registry is None:
         _plugin_registry = PluginRegistry()
         loop = asyncio.get_running_loop()
-        PluginHub.configure(_plugin_registry, loop)
+        PluginHub.configure(_plugin_registry, loop, mcp=server)
 
     # Record server startup telemetry
     start_time = time.time()
@@ -200,6 +207,31 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
                     _unity_connection_pool.get_connection()
                     logger.info(
                         "Connected to default Unity instance on startup")
+
+                    # In stdio mode, query Unity for tool enabled states and sync
+                    # server-level visibility. In HTTP mode this is handled by
+                    # register_tools via WebSocket in PluginHub.
+                    if (config.transport_mode or "stdio").lower() != "http":
+                        try:
+                            from services.tools import sync_tool_visibility_from_unity
+                            sync_result = await sync_tool_visibility_from_unity(notify=False)
+                            if sync_result.get("synced"):
+                                logger.info(
+                                    "Stdio startup: synced tool visibility from Unity — "
+                                    "enabled=[%s], disabled=[%s]",
+                                    ", ".join(sync_result.get("enabled_groups", [])),
+                                    ", ".join(sync_result.get("disabled_groups", [])),
+                                )
+                            else:
+                                # Unsupported command = old Unity package; just debug-log
+                                log_fn = logger.debug if sync_result.get("unsupported") else logger.warning
+                                log_fn(
+                                    "Stdio startup: could not sync tool visibility: %s",
+                                    sync_result.get("error", "unknown"),
+                                )
+                        except Exception as sync_exc:
+                            logger.debug(
+                                "Stdio startup: tool visibility sync failed: %s", sync_exc)
 
                     # Record successful Unity connection (deferred)
                     threading.Timer(1.0, lambda: record_telemetry(
@@ -303,6 +335,13 @@ Console Monitoring:
 Menu Items:
 - Use `execute_menu_item` when you have read the menu items resource
 - This lets you interact with Unity's menu system and third-party tools
+
+Unity API Verification (requires 'docs' tool group):
+- When the 'docs' tool group is active, use `unity_reflect` and `unity_docs` to verify Unity API details before answering questions or writing C# code. LLM training data frequently contains incorrect, outdated, or hallucinated Unity APIs.
+- BEFORE answering Unity API questions: search the project's assets (`manage_asset`) and reflect the API (`unity_reflect`) to verify. Do NOT rely on training data alone.
+- Common hallucination areas: shaders and materials (always search assets for actual shader names), package-specific APIs (Input System, Cinemachine, ProBuilder, NavMesh, URP/HDRP), and APIs that changed between Unity versions.
+- Workflow: `unity_reflect search` → `unity_reflect get_type` → `unity_reflect get_member` → `unity_docs get_doc` (if you need examples/caveats).
+- For shader/material questions: use `manage_asset(action="search", filter_type="Shader")` to find actual shaders in the project before recommending one.
 
 Payload sizing & paging (important):
 - Many Unity queries can return very large JSON. Prefer **paged + summary-first** calls.
@@ -586,7 +625,10 @@ def create_mcp_server(project_scoped_tools: bool) -> FastMCP:
             config.api_key_cache_ttl,
         )
 
-    # Mount plugin websocket hub at /hub/plugin when HTTP transport is active
+    # Mount plugin websocket hub at /hub/plugin when HTTP transport is active.
+    # NOTE: Uses FastMCP private API because custom_route() only supports HTTP
+    # methods, not WebSocket. _additional_http_routes accepts Starlette Route
+    # objects and is still present in FastMCP 3.x.
     existing_routes = [
         route for route in mcp._get_additional_http_routes()
         if isinstance(route, WebSocketRoute) and route.path == "/hub/plugin"

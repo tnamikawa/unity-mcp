@@ -1,6 +1,7 @@
 """Scene CLI commands."""
 
 import sys
+
 import click
 from typing import Optional, Any
 
@@ -195,37 +196,3 @@ def build_settings():
     click.echo(format_output(result, config.format))
 
 
-@scene.command("screenshot")
-@click.option(
-    "--filename", "-f",
-    default=None,
-    help="Output filename (default: timestamp)."
-)
-@click.option(
-    "--supersize", "-s",
-    default=1,
-    type=int,
-    help="Supersize multiplier (1-4)."
-)
-@handle_unity_errors
-def screenshot(filename: Optional[str], supersize: int):
-    """Capture a screenshot of the scene.
-
-    \b
-    Examples:
-        unity-mcp scene screenshot
-        unity-mcp scene screenshot --filename "level_preview"
-        unity-mcp scene screenshot --supersize 2
-    """
-    config = get_config()
-
-    params: dict[str, Any] = {"action": "screenshot"}
-    if filename:
-        params["fileName"] = filename
-    if supersize > 1:
-        params["superSize"] = supersize
-
-    result = run_command("manage_scene", params, config)
-    click.echo(format_output(result, config.format))
-    if result.get("success"):
-        print_success("Screenshot captured")

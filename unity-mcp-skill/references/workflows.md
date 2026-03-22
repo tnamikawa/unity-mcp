@@ -11,6 +11,12 @@ Common workflows and patterns for effective Unity-MCP usage.
 - [Testing Workflows](#testing-workflows)
 - [Debugging Workflows](#debugging-workflows)
 - [UI Creation Workflows](#ui-creation-workflows)
+- [Camera & Cinemachine Workflows](#camera--cinemachine-workflows)
+- [ProBuilder Workflows](#probuilder-workflows)
+- [Graphics & Rendering Workflows](#graphics--rendering-workflows)
+- [Package Management Workflows](#package-management-workflows)
+- [Package Deployment Workflows](#package-deployment-workflows)
+- [API Verification Workflows](#api-verification-workflows)
 - [Batch Operations](#batch-operations)
 
 ---
@@ -51,6 +57,73 @@ if editor_state["is_compiling"]:
 
 ---
 
+## Scene Generator Build Workflow
+
+### Fresh Scene Before Building
+
+**Always start a generated scene build with `manage_scene(action="create")`** to get a clean empty scene. This avoids conflicts with existing default objects (Camera, Light) that would cause "already exists" errors when the execution plan tries to create its own.
+
+```python
+# Step 0: Create fresh empty scene (replaces current scene entirely)
+manage_scene(action="create", name="MyGeneratedScene", path="Assets/Scenes/")
+
+# Now proceed with the phased execution plan...
+# Phase 1: Environment (camera, lights) — no conflicts
+# Phase 2: Objects (GameObjects)
+# Phase 3: Materials
+# etc.
+```
+
+### Wiring Object References Between Components
+
+After creating scripts and attaching components, use `set_property` to wire cross-references between GameObjects. Use the `{"name": "ObjectName"}` format to reference scene objects by name:
+
+```python
+# Wire a list of target GameObjects into a script's serialized field
+manage_components(
+    action="set_property",
+    target="BeeManager",
+    component_type="BeeManagerScript",
+    property="targetObjects",
+    value=[{"name": "Flower_1"}, {"name": "Flower_2"}, {"name": "Flower_3"}]
+)
+```
+
+### Physics Requirements for Trigger-Based Interactions
+
+When scripts use `OnTriggerEnter` / `OnTriggerStay` / `OnTriggerExit`, at least one of the two colliding objects **must** have a `Rigidbody` component. Common pattern:
+
+```python
+# Moving objects (bees, players) need Rigidbody for triggers to fire
+batch_execute(commands=[
+    {"tool": "manage_components", "params": {
+        "action": "add", "target": "Bee_1", "component_type": "Rigidbody"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "Bee_1",
+        "component_type": "Rigidbody",
+        "properties": {"useGravity": false, "isKinematic": true}
+    }}
+])
+```
+
+### Script Overwrites with `manage_script(action="update")`
+
+When a generated script needs to be rewritten (e.g., to add auto-wiring logic), use `update` instead of deleting and recreating:
+
+```python
+manage_script(
+    action="update",
+    path="Assets/Scripts/MyScript.cs",
+    contents="using UnityEngine;\n\npublic class MyScript : MonoBehaviour { ... }"
+)
+# manage_script update auto-triggers import + compile — just wait and check console
+# Read mcpforunity://editor/state → wait until is_compiling == false
+read_console(types=["error"], count=10)
+```
+
+---
+
 ## Scene Creation Workflows
 
 ### Create Complete Scene from Scratch
@@ -87,7 +160,7 @@ manage_gameobject(action="modify", target="Main Camera", position=[0, 5, -10],
     rotation=[30, 0, 0])
 
 # 5. Verify with screenshot
-manage_scene(action="screenshot")
+manage_camera(action="screenshot")
 
 # 6. Save scene
 manage_scene(action="save")
@@ -138,7 +211,7 @@ for i in range(10):
 ### Create New Script and Attach
 
 ```python
-# 1. Create script
+# 1. Create script (automatically triggers import + compilation)
 create_script(
     path="Assets/Scripts/EnemyAI.cs",
     contents='''using UnityEngine;
@@ -147,7 +220,7 @@ public class EnemyAI : MonoBehaviour
 {
     public float speed = 5f;
     public Transform target;
-    
+
     void Update()
     {
         if (target != null)
@@ -159,8 +232,8 @@ public class EnemyAI : MonoBehaviour
 }'''
 )
 
-# 2. CRITICAL: Refresh and compile
-refresh_unity(mode="force", scope="scripts", compile="request", wait_for_ready=True)
+# 2. Wait for compilation to finish
+# Read mcpforunity://editor/state → wait until is_compiling == false
 
 # 3. Check for errors
 console = read_console(types=["error"], count=10)
@@ -170,7 +243,7 @@ if console["messages"]:
 else:
     # 4. Attach to GameObject
     manage_gameobject(action="modify", target="Enemy", components_to_add=["EnemyAI"])
-    
+
     # 5. Set component properties
     manage_components(
         action="set_property",
@@ -216,8 +289,8 @@ validate_script(
     level="standard"
 )
 
-# 5. Refresh
-refresh_unity(mode="force", scope="scripts", compile="request", wait_for_ready=True)
+# 5. Wait for compilation (script_apply_edits auto-triggers import + compile)
+# Read mcpforunity://editor/state → wait until is_compiling == false
 
 # 6. Check console
 read_console(types=["error"], count=10)
@@ -277,7 +350,7 @@ manage_material(
 )
 
 # 3. Verify visually
-manage_scene(action="screenshot")
+manage_camera(action="screenshot")
 ```
 
 ### Create Procedural Texture
@@ -346,6 +419,35 @@ for asset in result["assets"]:
     info = manage_prefabs(action="get_info", prefab_path=prefab_path)
     print(f"Prefab: {prefab_path}, Children: {info['childCount']}")
 ```
+
+### Instantiate Prefab in Scene
+
+Use `manage_gameobject` (not `manage_prefabs`) to place prefab instances in the scene.
+
+```python
+# Full path
+manage_gameobject(
+    action="create",
+    name="Enemy_1",
+    prefab_path="Assets/Prefabs/Enemy.prefab",
+    position=[5, 0, 3],
+    parent="Enemies"
+)
+
+# Smart lookup — just the prefab name works too
+manage_gameobject(action="create", name="Enemy_2", prefab_path="Enemy", position=[10, 0, 3])
+
+# Batch-spawn multiple instances
+batch_execute(commands=[
+    {"tool": "manage_gameobject", "params": {
+        "action": "create", "name": f"Enemy_{i}",
+        "prefab_path": "Enemy", "position": [i * 3, 0, 0], "parent": "Enemies"
+    }}
+    for i in range(5)
+])
+```
+
+> **Note:** `manage_prefabs` is for headless prefab editing (inspect, modify contents, create from GameObject). To *instantiate* a prefab into the scene, always use `manage_gameobject(action="create", prefab_path="...")`.
 
 ---
 
@@ -416,8 +518,8 @@ public class PlayerTests
 }'''
 )
 
-# 2. Refresh
-refresh_unity(mode="force", scope="scripts", compile="request", wait_for_ready=True)
+# 2. Wait for compilation (create_script auto-triggers import + compile)
+# Read mcpforunity://editor/state → wait until is_compiling == false
 
 # 3. Run test (expect pass for this simple test)
 result = run_tests(mode="EditMode", test_names=["PlayerTests.TestPlayerStartsAtOrigin"])
@@ -487,21 +589,200 @@ for item in hierarchy["data"]["items"]:
         print(f"Object {item['name']} fell through floor!")
 
 # 3. Visual verification
-manage_scene(action="screenshot")
+manage_camera(action="screenshot")
 ```
 
 ---
 
 ## UI Creation Workflows
 
-Unity UI (Canvas-based UGUI) requires specific component hierarchies. Use `batch_execute` with `fail_fast=True` to create complete UI elements in a single call.
+Unity has two UI systems: **UI Toolkit** (modern, recommended) and **uGUI** (Canvas-based, legacy). Use `manage_ui` for UI Toolkit workflows, and `batch_execute` with `manage_gameobject` + `manage_components` for uGUI.
 
 > **Template warning:** This section is a skill template library, not a guaranteed source of truth. Examples may be inaccurate for your Unity version, package setup, or project conventions.
 > **Use safely:**
-> 1. Validate component/property names against the current project.
-> 2. Prefer targeting by instance ID or full path over generic names.
-> 3. Assume complex controls (Slider/Toggle/TMP Input) may need extra reference wiring.
+> 1. **Always read `mcpforunity://project/info` first** to detect installed packages and input system.
+> 2. Validate component/property names against the current project.
+> 3. Prefer targeting by instance ID or full path over generic names.
 > 4. Treat numeric enum values as placeholders and verify before reuse.
+
+### Step 0: Detect Project UI Capabilities
+
+**Before creating any UI**, read project info to determine which packages and input system are available.
+
+```python
+# Read mcpforunity://project/info — returns:
+# {
+#   "renderPipeline": "BuiltIn" | "Universal" | "HighDefinition" | "Custom",
+#   "activeInputHandler": "Old" | "New" | "Both",
+#   "packages": {
+#     "ugui": true/false,        — com.unity.ugui (Canvas, Image, Button, etc.)
+#     "textmeshpro": true/false,  — com.unity.textmeshpro (TextMeshProUGUI)
+#     "inputsystem": true/false,  — com.unity.inputsystem (new Input System)
+#     "uiToolkit": true/false,    — UI Toolkit (always true for Unity 2021.3+)
+#     "screenCapture": true/false  — ScreenCapture module enabled
+#   }
+# }
+```
+
+**Decision matrix:**
+
+| project_info field | Value | What to use |
+|---|---|---|
+| `packages.uiToolkit` | `true` | **Preferred:** Use `manage_ui` for UI Toolkit (UXML/USS) |
+| `packages.ugui` | `true` | Canvas-based UI (Image, Button, etc.) via `batch_execute` |
+| `packages.textmeshpro` | `true` | `TextMeshProUGUI` for text (uGUI) |
+| `packages.textmeshpro` | `false` | `UnityEngine.UI.Text` (legacy, lower quality) |
+| `activeInputHandler` | `"Old"` | `StandaloneInputModule` for EventSystem (uGUI) |
+| `activeInputHandler` | `"New"` | `InputSystemUIInputModule` for EventSystem (uGUI) |
+| `activeInputHandler` | `"Both"` | Either works; prefer `InputSystemUIInputModule` for UI |
+
+### UI Toolkit Workflows (manage_ui)
+
+UI Toolkit uses a web-like approach: **UXML** (like HTML) for structure, **USS** (like CSS) for styling. This is the preferred UI system for new projects.
+
+> **Important:** Always use `<ui:Style>` (with the `ui:` namespace prefix) in UXML, not bare `<Style>`. UI Builder will fail to open files that use `<Style>` without the prefix.
+
+#### Create a Complete UI Screen
+
+```python
+# 1. Create UXML document (structure)
+manage_ui(
+    action="create",
+    path="Assets/UI/MainMenu.uxml",
+    contents='''<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements">
+    <ui:Style src="Assets/UI/MainMenu.uss" />
+    <ui:VisualElement name="root" class="root-container">
+        <ui:Label text="My Game" class="title" />
+        <ui:Button text="Play" name="play-btn" class="menu-button" />
+        <ui:Button text="Settings" name="settings-btn" class="menu-button" />
+        <ui:Button text="Quit" name="quit-btn" class="menu-button" />
+    </ui:VisualElement>
+</ui:UXML>'''
+)
+
+# 2. Create USS stylesheet (styling)
+manage_ui(
+    action="create",
+    path="Assets/UI/MainMenu.uss",
+    contents='''.root-container {
+    flex-grow: 1;
+    justify-content: center;
+    align-items: center;
+    background-color: rgba(0, 0, 0, 0.8);
+}
+.title {
+    font-size: 48px;
+    color: white;
+    -unity-font-style: bold;
+    margin-bottom: 40px;
+}
+.menu-button {
+    width: 300px;
+    height: 60px;
+    font-size: 24px;
+    margin: 8px;
+    background-color: rgb(50, 120, 200);
+    color: white;
+    border-radius: 8px;
+}
+.menu-button:hover {
+    background-color: rgb(70, 140, 220);
+}'''
+)
+
+# 3. Create a GameObject and attach UIDocument
+manage_gameobject(action="create", name="UIRoot")
+manage_ui(
+    action="attach_ui_document",
+    target="UIRoot",
+    source_asset="Assets/UI/MainMenu.uxml"
+    # panel_settings auto-created if omitted
+)
+
+# 4. Verify the visual tree
+manage_ui(action="get_visual_tree", target="UIRoot", max_depth=5)
+```
+
+#### Update Existing UI
+
+```python
+# Read current content
+result = manage_ui(action="read", path="Assets/UI/MainMenu.uss")
+# Modify and update
+manage_ui(
+    action="update",
+    path="Assets/UI/MainMenu.uss",
+    contents=".title { font-size: 64px; color: yellow; }"
+)
+```
+
+#### Custom PanelSettings
+
+```python
+# Create PanelSettings with ScaleWithScreenSize
+manage_ui(
+    action="create_panel_settings",
+    path="Assets/UI/GamePanelSettings.asset",
+    scale_mode="ScaleWithScreenSize",
+    reference_resolution={"width": 1920, "height": 1080}
+)
+
+# Attach UIDocument with custom PanelSettings
+manage_ui(
+    action="attach_ui_document",
+    target="UIRoot",
+    source_asset="Assets/UI/MainMenu.uxml",
+    panel_settings="Assets/UI/GamePanelSettings.asset"
+)
+```
+
+### uGUI (Canvas-Based) Workflows
+
+The sections below cover legacy Canvas-based UI using `batch_execute`. Use these when working with existing uGUI projects or when UI Toolkit is not suitable.
+
+### RectTransform Sizing (Critical for All UI Children)
+
+Every GameObject under a Canvas gets a `RectTransform` instead of `Transform`. **Without setting anchor/size, UI elements default to zero size and won't be visible.** Use `set_property` on `RectTransform`:
+
+```python
+# Stretch to fill parent (common for panels/backgrounds)
+{"tool": "manage_components", "params": {
+    "action": "set_property", "target": "MyPanel",
+    "component_type": "RectTransform",
+    "properties": {
+        "anchorMin": [0, 0],        # bottom-left corner
+        "anchorMax": [1, 1],        # top-right corner
+        "sizeDelta": [0, 0],        # no extra size beyond anchors
+        "anchoredPosition": [0, 0]  # centered on anchors
+    }
+}}
+
+# Fixed-size centered element (e.g. 300x50 button)
+{"tool": "manage_components", "params": {
+    "action": "set_property", "target": "MyButton",
+    "component_type": "RectTransform",
+    "properties": {
+        "anchorMin": [0.5, 0.5],
+        "anchorMax": [0.5, 0.5],
+        "sizeDelta": [300, 50],
+        "anchoredPosition": [0, 0]
+    }
+}}
+
+# Top-anchored bar (e.g. health bar at top of screen)
+{"tool": "manage_components", "params": {
+    "action": "set_property", "target": "TopBar",
+    "component_type": "RectTransform",
+    "properties": {
+        "anchorMin": [0, 1],        # left-top
+        "anchorMax": [1, 1],        # right-top (stretch horizontally)
+        "sizeDelta": [0, 60],       # 60px tall, full width
+        "anchoredPosition": [0, -30] # offset down by half height
+    }
+}}
+```
+
+> **Note:** Vector2 properties accept both `[x, y]` array format and `{"x": ..., "y": ...}` object format.
 
 ### Create Canvas (Foundation for All UI)
 
@@ -541,9 +822,10 @@ batch_execute(fail_fast=True, commands=[
 
 ### Create EventSystem (Required Once Per Scene for UI Interaction)
 
-If no EventSystem exists in the scene, buttons and other interactive UI elements won't respond to input. Create one alongside your first Canvas.
+If no EventSystem exists in the scene, buttons and other interactive UI elements won't respond to input. Create one alongside your first Canvas. **Check `project_info.activeInputHandler` to pick the correct input module.**
 
 ```python
+# For activeInputHandler == "New" or "Both" (project has Input System package):
 batch_execute(fail_fast=True, commands=[
     {"tool": "manage_gameobject", "params": {
         "action": "create", "name": "EventSystem"
@@ -557,9 +839,22 @@ batch_execute(fail_fast=True, commands=[
         "component_type": "UnityEngine.InputSystem.UI.InputSystemUIInputModule"
     }}
 ])
-```
 
-> **Note:** For projects using legacy Input Manager instead of Input System, use `"component_type": "UnityEngine.EventSystems.StandaloneInputModule"` instead.
+# For activeInputHandler == "Old" (legacy Input Manager only):
+batch_execute(fail_fast=True, commands=[
+    {"tool": "manage_gameobject", "params": {
+        "action": "create", "name": "EventSystem"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "add", "target": "EventSystem",
+        "component_type": "UnityEngine.EventSystems.EventSystem"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "add", "target": "EventSystem",
+        "component_type": "UnityEngine.EventSystems.StandaloneInputModule"
+    }}
+])
+```
 
 ### Create Panel (Background Container)
 
@@ -573,18 +868,26 @@ batch_execute(fail_fast=True, commands=[
     {"tool": "manage_components", "params": {
         "action": "add", "target": "MenuPanel", "component_type": "Image"
     }},
-    # Set semi-transparent dark background
     {"tool": "manage_components", "params": {
         "action": "set_property", "target": "MenuPanel",
         "component_type": "Image", "property": "color",
         "value": [0.1, 0.1, 0.1, 0.8]
+    }},
+    # Size the panel (stretch to 60% of canvas, centered)
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "MenuPanel",
+        "component_type": "RectTransform",
+        "properties": {
+            "anchorMin": [0.2, 0.1], "anchorMax": [0.8, 0.9],
+            "sizeDelta": [0, 0], "anchoredPosition": [0, 0]
+        }
     }}
 ])
 ```
 
 ### Create Text (TextMeshPro)
 
-TextMeshProUGUI automatically adds a RectTransform when added to a child of a Canvas.
+TextMeshProUGUI automatically adds a RectTransform when added to a child of a Canvas. If `packages.textmeshpro` is `false`, use `UnityEngine.UI.Text` instead.
 
 ```python
 batch_execute(fail_fast=True, commands=[
@@ -604,6 +907,14 @@ batch_execute(fail_fast=True, commands=[
             "alignment": 514,
             "color": [1, 1, 1, 1]
         }
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "TitleText",
+        "component_type": "RectTransform",
+        "properties": {
+            "anchorMin": [0, 0.8], "anchorMax": [1, 1],
+            "sizeDelta": [0, 0], "anchoredPosition": [0, 0]
+        }
     }}
 ])
 ```
@@ -616,7 +927,6 @@ A Button needs an `Image` (visual) + `Button` (interaction) on the parent, and a
 
 ```python
 batch_execute(fail_fast=True, commands=[
-    # Button container with Image + Button components
     {"tool": "manage_gameobject", "params": {
         "action": "create", "name": "StartButton", "parent": "MenuPanel"
     }},
@@ -631,7 +941,15 @@ batch_execute(fail_fast=True, commands=[
         "component_type": "Image", "property": "color",
         "value": [0.2, 0.6, 1.0, 1.0]
     }},
-    # Child text label
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "StartButton",
+        "component_type": "RectTransform",
+        "properties": {
+            "anchorMin": [0.5, 0.5], "anchorMax": [0.5, 0.5],
+            "sizeDelta": [300, 60], "anchoredPosition": [0, 0]
+        }
+    }},
+    # Child text label (stretches to fill button)
     {"tool": "manage_gameobject", "params": {
         "action": "create", "name": "StartButton_Label", "parent": "StartButton"
     }},
@@ -643,17 +961,25 @@ batch_execute(fail_fast=True, commands=[
         "action": "set_property", "target": "StartButton_Label",
         "component_type": "TextMeshProUGUI",
         "properties": {"text": "Start Game", "fontSize": 24, "alignment": 514}
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "StartButton_Label",
+        "component_type": "RectTransform",
+        "properties": {
+            "anchorMin": [0, 0], "anchorMax": [1, 1],
+            "sizeDelta": [0, 0], "anchoredPosition": [0, 0]
+        }
     }}
 ])
 ```
 
-### Create Slider
+### Create Slider (With Reference Wiring)
 
-A Slider requires a specific hierarchy: the slider root, a background, a fill area with fill, and a handle area with handle.
+A Slider requires a specific hierarchy and **must have its `fillRect` and `handleRect` references wired** to function.
 
 ```python
+# Step 1: Create hierarchy
 batch_execute(fail_fast=True, commands=[
-    # Slider root
     {"tool": "manage_gameobject", "params": {
         "action": "create", "name": "HealthSlider", "parent": "MainCanvas"
     }},
@@ -663,49 +989,95 @@ batch_execute(fail_fast=True, commands=[
     {"tool": "manage_components", "params": {
         "action": "add", "target": "HealthSlider", "component_type": "Image"
     }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "HealthSlider",
+        "component_type": "RectTransform",
+        "properties": {
+            "anchorMin": [0.5, 0.5], "anchorMax": [0.5, 0.5],
+            "sizeDelta": [400, 30], "anchoredPosition": [0, 0]
+        }
+    }},
     # Background
     {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Background", "parent": "HealthSlider"
+        "action": "create", "name": "SliderBG", "parent": "HealthSlider"
     }},
     {"tool": "manage_components", "params": {
-        "action": "add", "target": "Background", "component_type": "Image"
+        "action": "add", "target": "SliderBG", "component_type": "Image"
     }},
     {"tool": "manage_components", "params": {
-        "action": "set_property", "target": "Background",
-        "component_type": "Image", "property": "color",
-        "value": [0.3, 0.3, 0.3, 1.0]
+        "action": "set_property", "target": "SliderBG",
+        "component_type": "Image", "property": "color", "value": [0.3, 0.3, 0.3, 1.0]
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "SliderBG",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [0, 0]}
     }},
     # Fill Area + Fill
     {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Fill Area", "parent": "HealthSlider"
+        "action": "create", "name": "FillArea", "parent": "HealthSlider"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "FillArea",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [0, 0]}
     }},
     {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Fill", "parent": "Fill Area"
+        "action": "create", "name": "SliderFill", "parent": "FillArea"
     }},
     {"tool": "manage_components", "params": {
-        "action": "add", "target": "Fill", "component_type": "Image"
+        "action": "add", "target": "SliderFill", "component_type": "Image"
     }},
     {"tool": "manage_components", "params": {
-        "action": "set_property", "target": "Fill",
-        "component_type": "Image", "property": "color",
-        "value": [0.2, 0.8, 0.2, 1.0]
+        "action": "set_property", "target": "SliderFill",
+        "component_type": "Image", "property": "color", "value": [0.2, 0.8, 0.2, 1.0]
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "SliderFill",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [0, 0]}
     }},
     # Handle Area + Handle
     {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Handle Slide Area", "parent": "HealthSlider"
-    }},
-    {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Handle", "parent": "Handle Slide Area"
+        "action": "create", "name": "HandleArea", "parent": "HealthSlider"
     }},
     {"tool": "manage_components", "params": {
-        "action": "add", "target": "Handle", "component_type": "Image"
+        "action": "set_property", "target": "HandleArea",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [0, 0]}
+    }},
+    {"tool": "manage_gameobject", "params": {
+        "action": "create", "name": "SliderHandle", "parent": "HandleArea"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "add", "target": "SliderHandle", "component_type": "Image"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "SliderHandle",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0.5, 0], "anchorMax": [0.5, 1], "sizeDelta": [20, 0]}
+    }}
+])
+
+# Step 2: Wire Slider references (CRITICAL — slider won't work without this)
+batch_execute(fail_fast=True, commands=[
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "HealthSlider",
+        "component_type": "Slider", "property": "fillRect",
+        "value": {"name": "SliderFill"}
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "HealthSlider",
+        "component_type": "Slider", "property": "handleRect",
+        "value": {"name": "SliderHandle"}
     }}
 ])
 ```
 
-### Create Input Field (TextMeshPro)
+### Create Input Field (With Reference Wiring)
 
 ```python
+# Step 1: Create hierarchy
 batch_execute(fail_fast=True, commands=[
     {"tool": "manage_gameobject", "params": {
         "action": "create", "name": "NameInput", "parent": "MenuPanel"
@@ -717,39 +1089,78 @@ batch_execute(fail_fast=True, commands=[
         "action": "add", "target": "NameInput",
         "component_type": "TMP_InputField"
     }},
-    # Text area child
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "NameInput",
+        "component_type": "RectTransform",
+        "properties": {
+            "anchorMin": [0.5, 0.5], "anchorMax": [0.5, 0.5],
+            "sizeDelta": [400, 50], "anchoredPosition": [0, 0]
+        }
+    }},
+    # Text Area child (clips text to input bounds)
     {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Text Area", "parent": "NameInput"
+        "action": "create", "name": "InputTextArea", "parent": "NameInput"
     }},
     {"tool": "manage_components", "params": {
-        "action": "add", "target": "Text Area",
-        "component_type": "RectMask2D"
+        "action": "add", "target": "InputTextArea", "component_type": "RectMask2D"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "InputTextArea",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [-16, -8]}
     }},
     # Placeholder
     {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Placeholder", "parent": "Text Area"
+        "action": "create", "name": "InputPlaceholder", "parent": "InputTextArea"
     }},
     {"tool": "manage_components", "params": {
-        "action": "add", "target": "Placeholder",
-        "component_type": "TextMeshProUGUI"
+        "action": "add", "target": "InputPlaceholder", "component_type": "TextMeshProUGUI"
     }},
     {"tool": "manage_components", "params": {
-        "action": "set_property", "target": "Placeholder",
+        "action": "set_property", "target": "InputPlaceholder",
         "component_type": "TextMeshProUGUI",
         "properties": {"text": "Enter name...", "fontStyle": 2, "color": [0.5, 0.5, 0.5, 0.5]}
     }},
-    # Actual text
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "InputPlaceholder",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [0, 0]}
+    }},
+    # Actual text display
     {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Text", "parent": "Text Area"
+        "action": "create", "name": "InputText", "parent": "InputTextArea"
     }},
     {"tool": "manage_components", "params": {
-        "action": "add", "target": "Text",
-        "component_type": "TextMeshProUGUI"
+        "action": "add", "target": "InputText", "component_type": "TextMeshProUGUI"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "InputText",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [0, 0]}
+    }}
+])
+
+# Step 2: Wire TMP_InputField references (CRITICAL)
+batch_execute(fail_fast=True, commands=[
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "NameInput",
+        "component_type": "TMP_InputField", "property": "textViewport",
+        "value": {"name": "InputTextArea"}
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "NameInput",
+        "component_type": "TMP_InputField", "property": "textComponent",
+        "value": {"name": "InputText"}
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "NameInput",
+        "component_type": "TMP_InputField", "property": "placeholder",
+        "value": {"name": "InputPlaceholder"}
     }}
 ])
 ```
 
-### Create Toggle (Checkbox)
+### Create Toggle (With Reference Wiring)
 
 ```python
 batch_execute(fail_fast=True, commands=[
@@ -759,41 +1170,72 @@ batch_execute(fail_fast=True, commands=[
     {"tool": "manage_components", "params": {
         "action": "add", "target": "SoundToggle", "component_type": "Toggle"
     }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "SoundToggle",
+        "component_type": "RectTransform",
+        "properties": {
+            "anchorMin": [0.5, 0.5], "anchorMax": [0.5, 0.5],
+            "sizeDelta": [200, 30], "anchoredPosition": [0, 0]
+        }
+    }},
     # Background box
     {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Background", "parent": "SoundToggle"
+        "action": "create", "name": "ToggleBG", "parent": "SoundToggle"
     }},
     {"tool": "manage_components", "params": {
-        "action": "add", "target": "Background", "component_type": "Image"
+        "action": "add", "target": "ToggleBG", "component_type": "Image"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "ToggleBG",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0, 0.5], "anchorMax": [0, 0.5], "sizeDelta": [26, 26], "anchoredPosition": [13, 0]}
     }},
     # Checkmark
     {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Checkmark", "parent": "Background"
+        "action": "create", "name": "ToggleCheckmark", "parent": "ToggleBG"
     }},
     {"tool": "manage_components", "params": {
-        "action": "add", "target": "Checkmark", "component_type": "Image"
+        "action": "add", "target": "ToggleCheckmark", "component_type": "Image"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "ToggleCheckmark",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0.1, 0.1], "anchorMax": [0.9, 0.9], "sizeDelta": [0, 0]}
     }},
     # Label
     {"tool": "manage_gameobject", "params": {
-        "action": "create", "name": "Label", "parent": "SoundToggle"
+        "action": "create", "name": "ToggleLabel", "parent": "SoundToggle"
     }},
     {"tool": "manage_components", "params": {
-        "action": "add", "target": "Label", "component_type": "TextMeshProUGUI"
+        "action": "add", "target": "ToggleLabel", "component_type": "TextMeshProUGUI"
     }},
     {"tool": "manage_components", "params": {
-        "action": "set_property", "target": "Label",
+        "action": "set_property", "target": "ToggleLabel",
         "component_type": "TextMeshProUGUI",
         "properties": {"text": "Sound Effects", "fontSize": 18, "alignment": 513}
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "ToggleLabel",
+        "component_type": "RectTransform",
+        "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [-35, 0], "anchoredPosition": [17.5, 0]}
+    }}
+])
+
+# Wire Toggle references (CRITICAL)
+batch_execute(fail_fast=True, commands=[
+    {"tool": "manage_components", "params": {
+        "action": "set_property", "target": "SoundToggle",
+        "component_type": "Toggle", "property": "graphic",
+        "value": {"name": "ToggleCheckmark"}
     }}
 ])
 ```
 
 ### Add Layout Group (Vertical/Horizontal/Grid)
 
-Layout groups auto-arrange child elements. Add to any container.
+Layout groups auto-arrange child elements, so you can skip manual RectTransform positioning for children.
 
 ```python
-# Vertical layout for a menu panel
 batch_execute(fail_fast=True, commands=[
     {"tool": "manage_components", "params": {
         "action": "add", "target": "MenuPanel",
@@ -804,12 +1246,12 @@ batch_execute(fail_fast=True, commands=[
         "component_type": "VerticalLayoutGroup",
         "properties": {
             "spacing": 10,
-            "childAlignment": 1,
+            "childAlignment": 4,
             "childForceExpandWidth": True,
-            "childForceExpandHeight": False
+            "childForceExpandHeight": False,
+            "padding": {"left": 20, "right": 20, "top": 20, "bottom": 20}
         }
     }},
-    # Add ContentSizeFitter to auto-resize
     {"tool": "manage_components", "params": {
         "action": "add", "target": "MenuPanel",
         "component_type": "ContentSizeFitter"
@@ -817,9 +1259,7 @@ batch_execute(fail_fast=True, commands=[
     {"tool": "manage_components", "params": {
         "action": "set_property", "target": "MenuPanel",
         "component_type": "ContentSizeFitter",
-        "properties": {
-            "verticalFit": 2
-        }
+        "properties": { "verticalFit": 2 }
     }}
 ])
 ```
@@ -829,7 +1269,7 @@ batch_execute(fail_fast=True, commands=[
 
 ### Complete Example: Main Menu Screen
 
-Combines multiple templates into a full menu screen in two batch calls (default 25 command limit per batch, configurable in Unity MCP Tools window up to 100).
+Combines multiple templates into a full menu screen in two batch calls (default 25 command limit per batch, configurable in Unity MCP Tools window up to 100). **Assumes `project_info` has been read and `activeInputHandler` is known.**
 
 ```python
 # Batch 1: Canvas + EventSystem + Panel + Title
@@ -841,14 +1281,15 @@ batch_execute(fail_fast=True, commands=[
     {"tool": "manage_components", "params": {"action": "add", "target": "MenuCanvas", "component_type": "GraphicRaycaster"}},
     {"tool": "manage_components", "params": {"action": "set_property", "target": "MenuCanvas", "component_type": "Canvas", "property": "renderMode", "value": 0}},
     {"tool": "manage_components", "params": {"action": "set_property", "target": "MenuCanvas", "component_type": "CanvasScaler", "properties": {"uiScaleMode": 1, "referenceResolution": [1920, 1080]}}},
-    # EventSystem
+    # EventSystem — use StandaloneInputModule OR InputSystemUIInputModule based on project_info
     {"tool": "manage_gameobject", "params": {"action": "create", "name": "EventSystem"}},
     {"tool": "manage_components", "params": {"action": "add", "target": "EventSystem", "component_type": "UnityEngine.EventSystems.EventSystem"}},
     {"tool": "manage_components", "params": {"action": "add", "target": "EventSystem", "component_type": "UnityEngine.EventSystems.StandaloneInputModule"}},
-    # Panel
+    # Panel (centered, 60% width)
     {"tool": "manage_gameobject", "params": {"action": "create", "name": "MenuPanel", "parent": "MenuCanvas"}},
     {"tool": "manage_components", "params": {"action": "add", "target": "MenuPanel", "component_type": "Image"}},
     {"tool": "manage_components", "params": {"action": "set_property", "target": "MenuPanel", "component_type": "Image", "property": "color", "value": [0.1, 0.1, 0.15, 0.9]}},
+    {"tool": "manage_components", "params": {"action": "set_property", "target": "MenuPanel", "component_type": "RectTransform", "properties": {"anchorMin": [0.2, 0.15], "anchorMax": [0.8, 0.85], "sizeDelta": [0, 0]}}},
     {"tool": "manage_components", "params": {"action": "add", "target": "MenuPanel", "component_type": "VerticalLayoutGroup"}},
     {"tool": "manage_components", "params": {"action": "set_property", "target": "MenuPanel", "component_type": "VerticalLayoutGroup", "properties": {"spacing": 20, "childAlignment": 4, "childForceExpandWidth": True, "childForceExpandHeight": False}}},
     # Title
@@ -864,25 +1305,28 @@ batch_execute(fail_fast=True, commands=[
     {"tool": "manage_components", "params": {"action": "add", "target": "PlayButton", "component_type": "Image"}},
     {"tool": "manage_components", "params": {"action": "add", "target": "PlayButton", "component_type": "Button"}},
     {"tool": "manage_components", "params": {"action": "set_property", "target": "PlayButton", "component_type": "Image", "property": "color", "value": [0.2, 0.6, 1.0, 1.0]}},
-    {"tool": "manage_gameobject", "params": {"action": "create", "name": "PlayButton_Label", "parent": "PlayButton"}},
-    {"tool": "manage_components", "params": {"action": "add", "target": "PlayButton_Label", "component_type": "TextMeshProUGUI"}},
-    {"tool": "manage_components", "params": {"action": "set_property", "target": "PlayButton_Label", "component_type": "TextMeshProUGUI", "properties": {"text": "Play", "fontSize": 32, "alignment": 514}}},
+    {"tool": "manage_gameobject", "params": {"action": "create", "name": "PlayLabel", "parent": "PlayButton"}},
+    {"tool": "manage_components", "params": {"action": "add", "target": "PlayLabel", "component_type": "TextMeshProUGUI"}},
+    {"tool": "manage_components", "params": {"action": "set_property", "target": "PlayLabel", "component_type": "TextMeshProUGUI", "properties": {"text": "Play", "fontSize": 32, "alignment": 514}}},
+    {"tool": "manage_components", "params": {"action": "set_property", "target": "PlayLabel", "component_type": "RectTransform", "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [0, 0]}}},
     # Settings Button
     {"tool": "manage_gameobject", "params": {"action": "create", "name": "SettingsButton", "parent": "MenuPanel"}},
     {"tool": "manage_components", "params": {"action": "add", "target": "SettingsButton", "component_type": "Image"}},
     {"tool": "manage_components", "params": {"action": "add", "target": "SettingsButton", "component_type": "Button"}},
     {"tool": "manage_components", "params": {"action": "set_property", "target": "SettingsButton", "component_type": "Image", "property": "color", "value": [0.3, 0.3, 0.35, 1.0]}},
-    {"tool": "manage_gameobject", "params": {"action": "create", "name": "SettingsButton_Label", "parent": "SettingsButton"}},
-    {"tool": "manage_components", "params": {"action": "add", "target": "SettingsButton_Label", "component_type": "TextMeshProUGUI"}},
-    {"tool": "manage_components", "params": {"action": "set_property", "target": "SettingsButton_Label", "component_type": "TextMeshProUGUI", "properties": {"text": "Settings", "fontSize": 32, "alignment": 514}}},
+    {"tool": "manage_gameobject", "params": {"action": "create", "name": "SettingsLabel", "parent": "SettingsButton"}},
+    {"tool": "manage_components", "params": {"action": "add", "target": "SettingsLabel", "component_type": "TextMeshProUGUI"}},
+    {"tool": "manage_components", "params": {"action": "set_property", "target": "SettingsLabel", "component_type": "TextMeshProUGUI", "properties": {"text": "Settings", "fontSize": 32, "alignment": 514}}},
+    {"tool": "manage_components", "params": {"action": "set_property", "target": "SettingsLabel", "component_type": "RectTransform", "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [0, 0]}}},
     # Quit Button
     {"tool": "manage_gameobject", "params": {"action": "create", "name": "QuitButton", "parent": "MenuPanel"}},
     {"tool": "manage_components", "params": {"action": "add", "target": "QuitButton", "component_type": "Image"}},
     {"tool": "manage_components", "params": {"action": "add", "target": "QuitButton", "component_type": "Button"}},
     {"tool": "manage_components", "params": {"action": "set_property", "target": "QuitButton", "component_type": "Image", "property": "color", "value": [0.8, 0.2, 0.2, 1.0]}},
-    {"tool": "manage_gameobject", "params": {"action": "create", "name": "QuitButton_Label", "parent": "QuitButton"}},
-    {"tool": "manage_components", "params": {"action": "add", "target": "QuitButton_Label", "component_type": "TextMeshProUGUI"}},
-    {"tool": "manage_components", "params": {"action": "set_property", "target": "QuitButton_Label", "component_type": "TextMeshProUGUI", "properties": {"text": "Quit", "fontSize": 32, "alignment": 514}}}
+    {"tool": "manage_gameobject", "params": {"action": "create", "name": "QuitLabel", "parent": "QuitButton"}},
+    {"tool": "manage_components", "params": {"action": "add", "target": "QuitLabel", "component_type": "TextMeshProUGUI"}},
+    {"tool": "manage_components", "params": {"action": "set_property", "target": "QuitLabel", "component_type": "TextMeshProUGUI", "properties": {"text": "Quit", "fontSize": 32, "alignment": 514}}},
+    {"tool": "manage_components", "params": {"action": "set_property", "target": "QuitLabel", "component_type": "RectTransform", "properties": {"anchorMin": [0, 0], "anchorMax": [1, 1], "sizeDelta": [0, 0]}}}
 ])
 ```
 
@@ -891,21 +1335,665 @@ batch_execute(fail_fast=True, commands=[
 | UI Element | Required Components | Notes |
 | ---------- | ------------------- | ----- |
 | **Canvas** | Canvas + CanvasScaler + GraphicRaycaster | Root for all UI. One per screen. |
-| **EventSystem** | EventSystem + StandaloneInputModule (or InputSystemUIInputModule) | One per scene. Required for interaction. |
-| **Panel** | Image | Container. Set color for background. |
-| **Text** | TextMeshProUGUI | Auto-adds RectTransform under Canvas. |
-| **Button** | Image + Button + child(TextMeshProUGUI) | Image = visual, Button = click handler. |
-| **Image** | Image | Set sprite property for custom graphics. |
-| **Slider** | Slider + Image + children(Background, Fill Area/Fill, Handle Slide Area/Handle) | Complex hierarchy. |
-| **Toggle** | Toggle + children(Background/Checkmark, Label) | Checkbox/radio button. |
-| **Input Field** | Image + TMP_InputField + children(Text Area/Placeholder/Text) | Text input. |
-| **Scroll View** | ScrollRect + Image + children(Viewport/Content, Scrollbar) | Scrollable container. |
-| **Dropdown** | Image + TMP_Dropdown + children(Label, Arrow, Template) | Selection menu. |
-| **Layout Group** | VerticalLayoutGroup / HorizontalLayoutGroup / GridLayoutGroup | Add to any container to auto-arrange children. |
+| **EventSystem** | EventSystem + input module (see below) | One per scene. Required for interaction. |
+| **Panel** | Image + RectTransform sizing | Container. Set color for background. |
+| **Text** | TextMeshProUGUI (or Text if no TMP) + RectTransform | Check `packages.textmeshpro`. |
+| **Button** | Image + Button + child(TextMeshProUGUI) + RectTransform | Image = visual, Button = click handler. |
+| **Slider** | Slider + Image + children + **wire fillRect/handleRect** | Won't function without wiring. |
+| **Toggle** | Toggle + children + **wire graphic** | Wire checkmark Image to `graphic`. |
+| **Input Field** | Image + TMP_InputField + children + **wire textViewport/textComponent/placeholder** | Won't function without wiring. |
+| **Layout Group** | VerticalLayoutGroup / HorizontalLayoutGroup / GridLayoutGroup | Auto-arranges children; skip manual RectTransform on children. |
+
+---
+
+## Input System: Old vs New
+
+Unity has two input systems that affect UI interaction, script input handling, and EventSystem configuration. **Always check `project_info.activeInputHandler` before creating EventSystems or writing input code.**
+
+### Detection
+
+```python
+# Read mcpforunity://project/info
+# activeInputHandler: "Old" | "New" | "Both"
+# packages.inputsystem: true/false (whether com.unity.inputsystem is installed)
+```
+
+### EventSystem — Old Input Manager
+
+Used when `activeInputHandler` is `"Old"`. Uses `StandaloneInputModule` which reads from `Input.GetAxis()` / `Input.GetButton()`.
+
+```python
+batch_execute(fail_fast=True, commands=[
+    {"tool": "manage_gameobject", "params": {"action": "create", "name": "EventSystem"}},
+    {"tool": "manage_components", "params": {
+        "action": "add", "target": "EventSystem",
+        "component_type": "UnityEngine.EventSystems.EventSystem"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "add", "target": "EventSystem",
+        "component_type": "UnityEngine.EventSystems.StandaloneInputModule"
+    }}
+])
+```
+
+Script pattern (old Input Manager):
+
+```csharp
+// Input.GetAxis / Input.GetKey — works with old Input Manager
+void Update()
+{
+    float h = Input.GetAxis("Horizontal");
+    float v = Input.GetAxis("Vertical");
+    transform.Translate(new Vector3(h, 0, v) * speed * Time.deltaTime);
+
+    if (Input.GetKeyDown(KeyCode.Space))
+        Jump();
+
+    if (Input.GetMouseButtonDown(0))
+        Fire();
+}
+```
+
+### EventSystem — New Input System
+
+Used when `activeInputHandler` is `"New"` or `"Both"`. Uses `InputSystemUIInputModule` from the `com.unity.inputsystem` package.
+
+```python
+batch_execute(fail_fast=True, commands=[
+    {"tool": "manage_gameobject", "params": {"action": "create", "name": "EventSystem"}},
+    {"tool": "manage_components", "params": {
+        "action": "add", "target": "EventSystem",
+        "component_type": "UnityEngine.EventSystems.EventSystem"
+    }},
+    {"tool": "manage_components", "params": {
+        "action": "add", "target": "EventSystem",
+        "component_type": "UnityEngine.InputSystem.UI.InputSystemUIInputModule"
+    }}
+])
+```
+
+Script pattern (new Input System with `PlayerInput` component):
+
+```csharp
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+public class PlayerController : MonoBehaviour
+{
+    public float speed = 5f;
+    private Vector2 moveInput;
+
+    // Called by PlayerInput component via SendMessages or UnityEvents
+    public void OnMove(InputValue value)
+    {
+        moveInput = value.Get<Vector2>();
+    }
+
+    public void OnJump(InputValue value)
+    {
+        if (value.isPressed)
+            Jump();
+    }
+
+    void Update()
+    {
+        Vector3 move = new Vector3(moveInput.x, 0, moveInput.y);
+        transform.Translate(move * speed * Time.deltaTime);
+    }
+}
+```
+
+### When `activeInputHandler` is `"Both"`
+
+Both systems are active simultaneously. For UI, prefer `InputSystemUIInputModule`. For gameplay scripts, either approach works — `Input.GetAxis()` still functions alongside the new Input System.
+
+```python
+# UI: use new Input System module
+{"tool": "manage_components", "params": {
+    "action": "add", "target": "EventSystem",
+    "component_type": "UnityEngine.InputSystem.UI.InputSystemUIInputModule"
+}}
+
+# Gameplay scripts: Input.GetAxis() still works in "Both" mode
+# But prefer the new Input System for consistency
+```
+
+> **Gotcha:** Adding `StandaloneInputModule` when `activeInputHandler` is `"New"` will cause a runtime error. Always check first.
+
+---
+
+## Camera & Cinemachine Workflows
+
+### Setting Up a Third-Person Camera
+
+```python
+# 1. Check Cinemachine availability
+manage_camera(action="ping")
+
+# 2. Ensure Brain on main camera
+manage_camera(action="ensure_brain")
+
+# 3. Create third-person camera with preset
+manage_camera(action="create_camera", properties={
+    "name": "FollowCam", "preset": "third_person",
+    "follow": "Player", "lookAt": "Player", "priority": 20
+})
+
+# 4. Fine-tune body
+manage_camera(action="set_body", target="FollowCam", properties={
+    "cameraDistance": 5.0, "shoulderOffset": [0.5, 0.5, 0]
+})
+
+# 5. Add camera shake
+manage_camera(action="set_noise", target="FollowCam", properties={
+    "amplitudeGain": 0.3, "frequencyGain": 0.8
+})
+
+# 6. Verify with screenshot
+manage_camera(action="screenshot", camera="FollowCam", include_image=True, max_resolution=512)
+```
+
+### Multi-Camera Setup with Blending
+
+```python
+# 1. Read current cameras
+# Read mcpforunity://scene/cameras
+
+# 2. Create gameplay camera (highest priority = active by default)
+manage_camera(action="create_camera", properties={
+    "name": "GameplayCam", "preset": "follow",
+    "follow": "Player", "lookAt": "Player", "priority": 10
+})
+
+# 3. Create cinematic camera (lower priority, activated on demand)
+manage_camera(action="create_camera", properties={
+    "name": "CinematicCam", "preset": "dolly",
+    "lookAt": "CutsceneTarget", "priority": 5
+})
+
+# 4. Set blend transition
+manage_camera(action="set_blend", properties={"style": "EaseInOut", "duration": 2.0})
+
+# 5. Force cinematic camera for a cutscene
+manage_camera(action="force_camera", target="CinematicCam")
+
+# 6. Release override to return to priority-based selection
+manage_camera(action="release_override")
+```
+
+### Camera Without Cinemachine
+
+```python
+# Tier 1 actions work with plain Unity Camera
+manage_camera(action="create_camera", properties={
+    "name": "MainCam", "fieldOfView": 50
+})
+
+# Set lens
+manage_camera(action="set_lens", target="MainCam", properties={
+    "fieldOfView": 60, "nearClipPlane": 0.1, "farClipPlane": 1000
+})
+
+# Point camera at target (uses manage_gameobject look_at under the hood)
+manage_camera(action="set_target", target="MainCam", properties={
+    "lookAt": "Player"
+})
+
+# Screenshot from this camera
+manage_camera(action="screenshot", camera="MainCam", include_image=True, max_resolution=512)
+```
+
+### Camera Inspection Workflow
+
+```python
+# 1. Read all cameras via resource
+# Read mcpforunity://scene/cameras
+# → Shows brain status, all Cinemachine cameras (priority, pipeline, targets),
+#   all Unity cameras (FOV, depth, brain)
+
+# 2. Get brain status for blending info
+manage_camera(action="get_brain_status")
+
+# 3. List cameras via tool (alternative to resource)
+manage_camera(action="list_cameras")
+
+# 4. Multi-view screenshot to see from different angles
+manage_camera(action="screenshot_multiview", max_resolution=480)
+```
+
+### Scene View Screenshot Workflow
+
+Use `capture_source="scene_view"` to capture the editor's Scene View viewport — useful for seeing gizmos, wireframes, grid, debug overlays, and objects without cameras.
+
+```python
+# 1. Capture the Scene View as-is
+manage_camera(action="screenshot", capture_source="scene_view", include_image=True)
+
+# 2. Frame on a specific object first, then capture
+manage_camera(action="screenshot", capture_source="scene_view",
+    view_target="Player", include_image=True, max_resolution=512)
+
+# 3. Frame on UI Canvas (RectTransform bounds are supported)
+manage_camera(action="screenshot", capture_source="scene_view",
+    view_target="Canvas", include_image=True)
+
+# Limitations: scene_view does not support batch, view_position, view_rotation, or camera selection.
+# Use capture_source="game_view" (default) for those features.
+```
+
+---
+
+## ProBuilder Workflows
+
+When `com.unity.probuilder` is installed, prefer ProBuilder shapes over primitive GameObjects for any geometry that needs editing, multi-material faces, or non-trivial shapes. Check availability first with `manage_probuilder(action="ping")`.
+
+See [ProBuilder Workflow Guide](probuilder-guide.md) for full reference with complex object examples.
+
+### ProBuilder vs Primitives Decision
+
+| Need | Use Primitives | Use ProBuilder |
+|------|---------------|----------------|
+| Simple placeholder cube | `manage_gameobject(action="create", primitive_type="Cube")` | - |
+| Editable geometry | - | `manage_probuilder(action="create_shape", ...)` |
+| Per-face materials | - | `set_face_material` |
+| Custom shapes (L-rooms, arches) | - | `create_poly_shape` or `create_shape` |
+| Mesh editing (extrude, bevel) | - | Face/edge/vertex operations |
+| Batch environment building | Either | ProBuilder + `batch_execute` |
+
+### Basic ProBuilder Scene Build
+
+```python
+# 1. Check ProBuilder availability
+manage_probuilder(action="ping")
+
+# 2. Create shapes (use batch for multiple)
+batch_execute(commands=[
+    {"tool": "manage_probuilder", "params": {
+        "action": "create_shape",
+        "properties": {"shape_type": "Cube", "name": "Floor", "width": 20, "height": 0.2, "depth": 20}
+    }},
+    {"tool": "manage_probuilder", "params": {
+        "action": "create_shape",
+        "properties": {"shape_type": "Cube", "name": "Wall1", "width": 20, "height": 3, "depth": 0.3,
+                       "position": [0, 1.5, 10]}
+    }},
+    {"tool": "manage_probuilder", "params": {
+        "action": "create_shape",
+        "properties": {"shape_type": "Cylinder", "name": "Pillar1", "radius": 0.4, "height": 3,
+                       "position": [5, 1.5, 5]}
+    }},
+])
+
+# 3. Edit geometry (always get_mesh_info first!)
+info = manage_probuilder(action="get_mesh_info", target="Wall1",
+    properties={"include": "faces"})
+# Find direction="front" face, subdivide it, delete center for a window
+
+# 4. Apply materials per face
+manage_probuilder(action="set_face_material", target="Floor",
+    properties={"faceIndices": [0], "materialPath": "Assets/Materials/Stone.mat"})
+
+# 5. Smooth organic shapes
+manage_probuilder(action="auto_smooth", target="Pillar1",
+    properties={"angleThreshold": 45})
+
+# 6. Screenshot to verify
+manage_camera(action="screenshot", include_image=True, max_resolution=512)
+```
+
+### Edit-Verify Loop Pattern
+
+Face indices change after every edit. Always re-query:
+
+```python
+# WRONG: Assume face indices are stable
+manage_probuilder(action="subdivide", target="Obj", properties={"faceIndices": [2]})
+manage_probuilder(action="delete_faces", target="Obj", properties={"faceIndices": [5]})  # Index may be wrong!
+
+# RIGHT: Re-query after each edit
+manage_probuilder(action="subdivide", target="Obj", properties={"faceIndices": [2]})
+info = manage_probuilder(action="get_mesh_info", target="Obj", properties={"include": "faces"})
+# Find the correct face by direction/center, then delete
+manage_probuilder(action="delete_faces", target="Obj", properties={"faceIndices": [correct_index]})
+```
+
+### Known Limitations
+
+- **`set_pivot`**: Broken -- vertex positions don't persist through mesh rebuild. Use `center_pivot` or Transform positioning.
+- **`convert_to_probuilder`**: Broken -- MeshImporter throws. Create shapes natively with `create_shape`/`create_poly_shape`.
+- **`subdivide`**: Uses `ConnectElements.Connect` (not traditional quad subdivision). Connects face midpoints.
+
+---
+
+## Graphics & Rendering Workflows
+
+### Setting Up Post-Processing
+
+Add post-processing effects to a URP/HDRP scene using Volumes.
+
+```python
+# 1. Check pipeline status and available effects
+manage_graphics(action="ping")
+
+# 2. List available volume effects for the active pipeline
+manage_graphics(action="volume_list_effects")
+
+# 3. Create a global post-processing volume with common effects
+manage_graphics(action="volume_create", name="GlobalPostProcess", is_global=True,
+    effects=[
+        {"type": "Bloom", "parameters": {"intensity": 1.0, "threshold": 0.9, "scatter": 0.7}},
+        {"type": "Vignette", "parameters": {"intensity": 0.35}},
+        {"type": "Tonemapping", "parameters": {"mode": 1}},
+        {"type": "ColorAdjustments", "parameters": {"postExposure": 0.2, "contrast": 10}}
+    ])
+
+# 4. Verify the volume was created
+# Read mcpforunity://scene/volumes
+
+# 5. Fine-tune an effect parameter
+manage_graphics(action="volume_set_effect", target="GlobalPostProcess",
+    effect="Bloom", parameters={"intensity": 1.5})
+
+# 6. Screenshot to verify visual result
+manage_camera(action="screenshot", include_image=True, max_resolution=512)
+```
+
+**Tips:**
+- Always `ping` first to confirm URP/HDRP is active. Volumes do nothing on Built-in RP.
+- Use `volume_list_effects` to discover available effect types for the active pipeline (URP and HDRP have different sets).
+- Use `volume_get_info` to inspect current effect parameters before modifying.
+- Create a reusable VolumeProfile asset with `volume_create_profile` and reference it via `profile_path` on multiple volumes.
+
+### Adding a Full-Screen Effect via Renderer Features (URP)
+
+Add a custom full-screen shader pass using URP Renderer Features.
+
+```python
+# 1. Check pipeline and confirm URP
+manage_graphics(action="ping")
+
+# 2. Create a material for the full-screen effect
+manage_material(action="create",
+    material_path="Assets/Materials/GrayscaleEffect.mat",
+    shader="Shader Graphs/GrayscaleFullScreen")
+
+# 3. List current renderer features
+manage_graphics(action="feature_list")
+
+# 4. Add a FullScreenPassRendererFeature with the material
+manage_graphics(action="feature_add",
+    feature_type="FullScreenPassRendererFeature",
+    name="GrayscalePass",
+    material="Assets/Materials/GrayscaleEffect.mat")
+
+# 5. Verify it was added
+manage_graphics(action="feature_list")
+
+# 6. Toggle it on/off to compare
+manage_graphics(action="feature_toggle", index=0, active=False)  # disable
+manage_camera(action="screenshot", include_image=True, max_resolution=512)
+
+manage_graphics(action="feature_toggle", index=0, active=True)   # re-enable
+manage_camera(action="screenshot", include_image=True, max_resolution=512)
+
+# 7. Reorder features if needed (execution order matters)
+manage_graphics(action="feature_reorder", order=[1, 0, 2])
+```
+
+**Tips:**
+- Renderer Features are URP-only. `feature_*` actions return an error on HDRP or Built-in RP.
+- Read `mcpforunity://pipeline/renderer-features` to inspect features without modifying.
+- Feature execution order affects the final image. Use `feature_reorder` to control pass ordering.
+
+### Configuring Light Baking
+
+Set up lightmaps, light probes, and reflection probes for baked GI.
+
+```python
+# 1. Set lights to Baked or Mixed mode
+manage_components(action="set_property", target="Directional Light",
+    component_type="Light", properties={"lightmapBakeType": 1})  # 1 = Mixed
+
+# 2. Mark static objects for lightmapping
+manage_gameobject(action="modify", target="Environment",
+    component_properties={"StaticFlags": "ContributeGI"})
+
+# 3. Configure lightmap settings
+manage_graphics(action="bake_get_settings")
+manage_graphics(action="bake_set_settings", settings={
+    "lightmapper": 1,           # 1 = Progressive GPU
+    "directSamples": 32,
+    "indirectSamples": 128,
+    "maxBounces": 4,
+    "lightmapResolution": 40
+})
+
+# 4. Place light probes for dynamic objects
+manage_graphics(action="bake_create_light_probe_group", name="MainProbeGrid",
+    position=[0, 1.5, 0], grid_size=[5, 3, 5], spacing=3.0)
+
+# 5. Place a reflection probe for an interior room
+manage_graphics(action="bake_create_reflection_probe", name="RoomReflection",
+    position=[0, 2, 0], size=[8, 4, 8], resolution=256,
+    hdr=True, box_projection=True)
+
+# 6. Start async bake
+manage_graphics(action="bake_start", async_bake=True)
+
+# 7. Poll bake status
+manage_graphics(action="bake_status")
+# Repeat until complete
+
+# 8. Bake the reflection probe separately if needed
+manage_graphics(action="bake_reflection_probe", target="RoomReflection")
+
+# 9. Check rendering stats after bake
+manage_graphics(action="stats_get")
+```
+
+**Tips:**
+- Baking only works in Edit mode. If the editor is in Play mode, `bake_start` will fail.
+- Use `bake_cancel` to abort a long bake.
+- `bake_clear` removes all baked data (lightmaps, probes). Use before re-baking from scratch.
+- For large scenes, use `async_bake=True` (default) and poll `bake_status` periodically.
+
+---
+
+## Package Management Workflows
+
+### Install a Package and Verify
+
+```python
+# 1. Check what's installed
+manage_packages(action="ping")
+manage_packages(action="list_packages")
+# Poll status until complete
+manage_packages(action="status", job_id="<job_id>")
+
+# 2. Install the package
+manage_packages(action="add_package", package="com.unity.inputsystem")
+# Poll until domain reload completes
+manage_packages(action="status", job_id="<job_id>")
+
+# 3. Verify no compilation errors
+read_console(types=["error"], count=10)
+
+# 4. Confirm it's installed
+manage_packages(action="get_package_info", package="com.unity.inputsystem")
+```
+
+### Add OpenUPM Registry and Install Package
+
+```python
+# 1. Add the OpenUPM scoped registry
+manage_packages(
+    action="add_registry",
+    name="OpenUPM",
+    url="https://package.openupm.com",
+    scopes=["com.cysharp"]
+)
+
+# 2. Force resolution to pick up the new registry
+manage_packages(action="resolve_packages")
+
+# 3. Install a package from OpenUPM
+manage_packages(action="add_package", package="com.cysharp.unitask")
+manage_packages(action="status", job_id="<job_id>")
+```
+
+### Safe Package Removal
+
+```python
+# 1. Check dependencies before removing
+manage_packages(action="remove_package", package="com.unity.modules.ui")
+# If blocked: "Cannot remove: 3 package(s) depend on it"
+
+# 2. Force removal if you're sure
+manage_packages(action="remove_package", package="com.unity.modules.ui", force=True)
+manage_packages(action="status", job_id="<job_id>")
+```
+
+### Install from Git URL (e.g., NuGetForUnity)
+
+```python
+# Git URLs trigger a security warning — ensure the source is trusted
+manage_packages(
+    action="add_package",
+    package="https://github.com/GlitchEnzo/NuGetForUnity.git?path=/src/NuGetForUnity"
+)
+manage_packages(action="status", job_id="<job_id>")
+```
+
+---
+
+## Package Deployment Workflows
+
+### Iterative Development Loop (Edit → Deploy → Test)
+
+Use `deploy_package` to copy your local MCPForUnity source into the project's installed package location. This bypasses the UI dialog and triggers recompilation automatically.
+
+```python
+# Prerequisites: Set the MCPForUnity source path in Advanced Settings first.
+
+# 1. Make code changes (e.g., edit C# tools)
+# script_apply_edits or create_script as needed
+
+# 2. Deploy the updated package (copies source → installed package, creates backup)
+manage_editor(action="deploy_package")
+
+# 3. Wait for recompilation to finish
+refresh_unity(mode="force", compile="request", wait_for_ready=True)
+
+# 4. Check for compilation errors
+read_console(types=["error"], count=10, include_stacktrace=True)
+
+# 5. Test the changes
+run_tests(mode="EditMode")
+```
+
+### Rollback After Failed Deploy
+
+```python
+# Restore from the automatic pre-deployment backup
+manage_editor(action="restore_package")
+
+# Wait for recompilation
+refresh_unity(mode="force", compile="request", wait_for_ready=True)
+```
+
+---
+
+## API Verification Workflows
+
+> These tools live in the opt-in `docs` group. Activate it first: `manage_tools(action="activate", group="docs")`
+
+### Full API Verification Before Writing Code
+
+Use `unity_reflect` and `unity_docs` to verify Unity APIs before writing C# code. This prevents hallucinated or outdated API references.
+
+**Trust hierarchy:** reflection (live runtime) > project assets > official docs.
+
+```python
+# Step 1: Search for the type you need
+unity_reflect(action="search", query="NavMesh")
+# → Returns matching types: NavMeshAgent, NavMeshPath, NavMeshHit, etc.
+
+# Step 2: Get member summary for the type
+unity_reflect(action="get_type", class_name="UnityEngine.AI.NavMeshAgent")
+# → Returns all methods, properties, fields (names only)
+
+# Step 3: Get full signature for specific members you plan to use
+unity_reflect(action="get_member", class_name="NavMeshAgent", member_name="SetDestination")
+# → Returns parameter types, return type, all overloads
+
+# Step 4: Get official docs for usage patterns and examples
+unity_docs(action="get_doc", class_name="NavMeshAgent", member_name="SetDestination")
+# → Returns description, signatures, parameters, code examples
+```
+
+### Batch API Lookup
+
+Use `unity_docs` `lookup` action to search multiple APIs in a single call:
+
+```python
+# Search ScriptReference + Manual in parallel (+ package docs if package/pkg_version provided)
+unity_docs(action="lookup", queries="Physics.Raycast,NavMeshAgent,Light2D")
+
+# Include package docs in the search
+unity_docs(action="lookup", query="VolumeProfile",
+           package="com.unity.render-pipelines.universal", pkg_version="17.0")
+```
+
+### Finding Shaders and Materials in Project
+
+The `lookup` action automatically searches project assets for asset-related queries:
+
+```python
+# This searches both docs AND project assets for shader-related content
+unity_docs(action="lookup", query="Lit shader")
+# → Returns doc hits + matching project assets (shaders, materials, etc.)
+```
+
+### Manual and Package Documentation
+
+```python
+# Fetch Unity Manual pages (execution order, scripting concepts, etc.)
+unity_docs(action="get_manual", slug="execution-order")
+
+# Fetch package-specific documentation
+unity_docs(action="get_package_doc",
+           package="com.unity.render-pipelines.universal",
+           page="2d-index", pkg_version="17.0")
+```
+
+### Verifying APIs Across Unity Versions
+
+```python
+# Specify Unity version for version-specific docs
+unity_docs(action="get_doc", class_name="Camera", member_name="main", version="6000.0.38f1")
+
+# Use reflection to check what's actually available in the running editor
+unity_reflect(action="search", query="InputAction", scope="packages")
+```
 
 ---
 
 ## Batch Operations
+
+### Batch Discovery (Multi-Search)
+
+Use `batch_execute` to search for multiple things in a single call instead of calling `find_gameobjects` repeatedly:
+
+```python
+# Instead of 4 separate find_gameobjects calls, batch them:
+batch_execute(commands=[
+    {"tool": "find_gameobjects", "params": {"search_term": "Camera", "search_method": "by_component"}},
+    {"tool": "find_gameobjects", "params": {"search_term": "Rigidbody", "search_method": "by_component"}},
+    {"tool": "find_gameobjects", "params": {"search_term": "Player", "search_method": "by_tag"}},
+    {"tool": "find_gameobjects", "params": {"search_term": "GameManager", "search_method": "by_name"}}
+])
+# Returns array of results, one per command
+```
 
 ### Mass Property Update
 

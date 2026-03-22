@@ -12,7 +12,12 @@ from services.tools.preflight import preflight
 
 
 @mcp_for_unity_tool(
-    description="Performs CRUD operations on Unity scenes. Read-only actions: get_hierarchy, get_active, get_build_settings, screenshot. Modifying actions: create, load, save.",
+    description=(
+        "Performs CRUD operations on Unity scenes. "
+        "Read-only actions: get_hierarchy, get_active, get_build_settings, scene_view_frame. "
+        "Modifying actions: create, load, save. "
+        "For screenshots, use manage_camera (screenshot, screenshot_multiview actions)."
+    ),
     annotations=ToolAnnotations(
         title="Manage Scene",
         destructiveHint=True,
@@ -27,16 +32,15 @@ async def manage_scene(
         "get_hierarchy",
         "get_active",
         "get_build_settings",
-        "screenshot",
-    ], "Perform CRUD operations on Unity scenes, and capture a screenshot."],
+        "scene_view_frame",
+    ], "Perform CRUD operations on Unity scenes and control the Scene View camera."],
     name: Annotated[str, "Scene name."] | None = None,
     path: Annotated[str, "Scene path."] | None = None,
     build_index: Annotated[int | str,
                            "Unity build index (quote as string, e.g., '0')."] | None = None,
-    screenshot_file_name: Annotated[str,
-                                    "Screenshot file name (optional). Defaults to timestamp when omitted."] | None = None,
-    screenshot_super_size: Annotated[int | str,
-                                     "Screenshot supersize multiplier (integer ≥1). Optional."] | None = None,
+    # --- scene_view_frame params ---
+    scene_view_target: Annotated[str | int,
+                                 "GameObject reference for scene_view_frame (name, path, or instance ID)."] | None = None,
     # --- get_hierarchy paging/safety ---
     parent: Annotated[str | int,
                       "Optional parent GameObject reference (name/path/instanceID) to list direct children."] | None = None,
@@ -53,15 +57,12 @@ async def manage_scene(
     include_transform: Annotated[bool | str,
                                  "If true, include local transform in node summaries."] | None = None,
 ) -> dict[str, Any]:
-    # Get active instance from session state
-    # Removed session_state import
-    unity_instance = get_unity_instance_from_context(ctx)
+    unity_instance = await get_unity_instance_from_context(ctx)
     gate = await preflight(ctx, wait_for_no_compile=True, refresh_if_dirty=True)
     if gate is not None:
         return gate.model_dump()
     try:
         coerced_build_index = coerce_int(build_index, default=None)
-        coerced_super_size = coerce_int(screenshot_super_size, default=None)
         coerced_page_size = coerce_int(page_size, default=None)
         coerced_cursor = coerce_int(cursor, default=None)
         coerced_max_nodes = coerce_int(max_nodes, default=None)
@@ -78,10 +79,10 @@ async def manage_scene(
             params["path"] = path
         if coerced_build_index is not None:
             params["buildIndex"] = coerced_build_index
-        if screenshot_file_name:
-            params["fileName"] = screenshot_file_name
-        if coerced_super_size is not None:
-            params["superSize"] = coerced_super_size
+
+        # scene_view_frame params
+        if scene_view_target is not None:
+            params["sceneViewTarget"] = scene_view_target
 
         # get_hierarchy paging/safety params (optional)
         if parent is not None:
@@ -104,7 +105,8 @@ async def manage_scene(
 
         # Preserve structured failure data; unwrap success into a friendlier shape
         if isinstance(response, dict) and response.get("success"):
-            return {"success": True, "message": response.get("message", "Scene operation successful."), "data": response.get("data")}
+            friendly = {"success": True, "message": response.get("message", "Scene operation successful."), "data": response.get("data")}
+            return friendly
         return response if isinstance(response, dict) else {"success": False, "message": str(response)}
 
     except Exception as e:

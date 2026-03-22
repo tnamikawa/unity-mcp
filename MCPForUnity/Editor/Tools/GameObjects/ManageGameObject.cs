@@ -80,7 +80,7 @@ namespace MCPForUnity.Editor.Tools.GameObjects
                 return new ErrorResponse(
                     $"Target '{targetPath}' is a prefab asset. " +
                     $"Use 'manage_asset' with action='modify' for prefab asset modifications, " +
-                    $"or 'manage_prefabs' with action='open_stage' to edit the prefab in isolation mode."
+                    $"or 'manage_prefabs' with action='modify_contents' to edit the prefab headlessly, or 'manage_editor' with action='close_prefab_stage' to exit prefab editing mode."
                 );
             }
             // --- End Prefab Asset Check ---
@@ -100,6 +100,8 @@ namespace MCPForUnity.Editor.Tools.GameObjects
                         return GameObjectDuplicate.Handle(@params, targetToken, searchMethod);
                     case "move_relative":
                         return GameObjectMoveRelative.Handle(@params, targetToken, searchMethod);
+                    case "look_at":
+                        return GameObjectLookAt.Handle(@params, targetToken, searchMethod);
 
                     default:
                         return new ErrorResponse($"Unknown action: '{action}'.");
