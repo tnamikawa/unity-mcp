@@ -17,7 +17,7 @@ namespace MCPForUnity.Editor.Helpers
     /// and provides convenience accessors for specific endpoints.
     ///
     /// HTTP Local stores the port in a plain text file at the project root
-    /// (`<ProjectRoot>/unity-mcp-port`); the host is fixed to `localhost`.
+    /// (`<ProjectRoot>/.unity-mcp-port`); the host is fixed to `localhost`.
     /// HTTP Remote stores its full URL in EditorPrefs.
     /// </summary>
     public static class HttpEndpointUtility
@@ -26,8 +26,8 @@ namespace MCPForUnity.Editor.Helpers
         private const string DefaultRemoteBaseUrl = "";
 
         // HTTP Local persists port number in a plain text file at the project root
-        // (`<ProjectRoot>/unity-mcp-port`). The host is fixed to `localhost`.
-        private const string PortFileName = "unity-mcp-port";
+        // (`<ProjectRoot>/.unity-mcp-port`). The host is fixed to `localhost`.
+        private const string PortFileName = ".unity-mcp-port";
         private const string LocalHost = "localhost";
         private const int DefaultLocalPort = 8080;
         private static string _portFilePathOverride;
