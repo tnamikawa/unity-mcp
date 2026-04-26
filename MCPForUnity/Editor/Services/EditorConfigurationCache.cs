@@ -52,7 +52,6 @@ namespace MCPForUnity.Editor.Services
         private bool _devModeForceServerRefresh;
         private string _uvxPathOverride;
         private string _gitUrlOverride;
-        private string _httpBaseUrl;
         private string _httpRemoteBaseUrl;
         private string _claudeCliPathOverride;
         private string _httpTransportScope;
@@ -87,12 +86,6 @@ namespace MCPForUnity.Editor.Services
         /// Default: empty string (use default)
         /// </summary>
         public string GitUrlOverride => _gitUrlOverride;
-
-        /// <summary>
-        /// HTTP base URL for the local MCP server.
-        /// Default: empty string
-        /// </summary>
-        public string HttpBaseUrl => _httpBaseUrl;
 
         /// <summary>
         /// HTTP base URL for the remote-hosted MCP server.
@@ -134,7 +127,6 @@ namespace MCPForUnity.Editor.Services
             _devModeForceServerRefresh = EditorPrefs.GetBool(EditorPrefKeys.DevModeForceServerRefresh, false);
             _uvxPathOverride = EditorPrefs.GetString(EditorPrefKeys.UvxPathOverride, string.Empty);
             _gitUrlOverride = EditorPrefs.GetString(EditorPrefKeys.GitUrlOverride, string.Empty);
-            _httpBaseUrl = EditorPrefs.GetString(ProjectIdentityUtility.GetProjectScopedKey(EditorPrefKeys.HttpBaseUrl), string.Empty);
             _httpRemoteBaseUrl = EditorPrefs.GetString(EditorPrefKeys.HttpRemoteBaseUrl, string.Empty);
             _claudeCliPathOverride = EditorPrefs.GetString(EditorPrefKeys.ClaudeCliPathOverride, string.Empty);
             _httpTransportScope = EditorPrefs.GetString(EditorPrefKeys.HttpTransportScope, string.Empty);
@@ -205,20 +197,6 @@ namespace MCPForUnity.Editor.Services
                 _gitUrlOverride = value;
                 EditorPrefs.SetString(EditorPrefKeys.GitUrlOverride, value);
                 OnConfigurationChanged?.Invoke(nameof(GitUrlOverride));
-            }
-        }
-
-        /// <summary>
-        /// Set HttpBaseUrl and update cache + EditorPrefs atomically.
-        /// </summary>
-        public void SetHttpBaseUrl(string value)
-        {
-            value = value ?? string.Empty;
-            if (_httpBaseUrl != value)
-            {
-                _httpBaseUrl = value;
-                EditorPrefs.SetString(ProjectIdentityUtility.GetProjectScopedKey(EditorPrefKeys.HttpBaseUrl), value);
-                OnConfigurationChanged?.Invoke(nameof(HttpBaseUrl));
             }
         }
 
@@ -299,9 +277,6 @@ namespace MCPForUnity.Editor.Services
                     break;
                 case nameof(GitUrlOverride):
                     _gitUrlOverride = EditorPrefs.GetString(EditorPrefKeys.GitUrlOverride, string.Empty);
-                    break;
-                case nameof(HttpBaseUrl):
-                    _httpBaseUrl = EditorPrefs.GetString(ProjectIdentityUtility.GetProjectScopedKey(EditorPrefKeys.HttpBaseUrl), string.Empty);
                     break;
                 case nameof(HttpRemoteBaseUrl):
                     _httpRemoteBaseUrl = EditorPrefs.GetString(EditorPrefKeys.HttpRemoteBaseUrl, string.Empty);

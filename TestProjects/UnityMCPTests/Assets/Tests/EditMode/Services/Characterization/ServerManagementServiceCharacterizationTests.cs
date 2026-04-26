@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using NUnit.Framework;
@@ -22,11 +23,11 @@ namespace MCPForUnityTests.Editor.Services.Characterization
     {
         private ServerManagementService _service;
         private bool _savedUseHttpTransport;
-        private string _savedHttpUrl;
         private string _savedHttpRemoteUrl;
         private string _savedHttpTransportScope;
         private bool _savedAllowLanHttpBind;
         private bool _savedAllowInsecureRemoteHttp;
+        private string _portFileOverride;
 
         [SetUp]
         public void SetUp()
@@ -34,11 +35,13 @@ namespace MCPForUnityTests.Editor.Services.Characterization
             _service = new ServerManagementService();
             // Save current settings
             _savedUseHttpTransport = EditorPrefs.GetBool(EditorPrefKeys.UseHttpTransport, true);
-            _savedHttpUrl = EditorPrefs.GetString(EditorPrefKeys.HttpBaseUrl, string.Empty);
             _savedHttpRemoteUrl = EditorPrefs.GetString(EditorPrefKeys.HttpRemoteBaseUrl, string.Empty);
             _savedHttpTransportScope = EditorPrefs.GetString(EditorPrefKeys.HttpTransportScope, string.Empty);
             _savedAllowLanHttpBind = EditorPrefs.GetBool(EditorPrefKeys.AllowLanHttpBind, false);
             _savedAllowInsecureRemoteHttp = EditorPrefs.GetBool(EditorPrefKeys.AllowInsecureRemoteHttp, false);
+
+            _portFileOverride = Path.Combine(Path.GetTempPath(), "UnityMCPTests-port-" + Guid.NewGuid().ToString("N"));
+            HttpEndpointUtility.SetPortFilePathOverrideForTesting(_portFileOverride);
         }
 
         [TearDown]
@@ -46,14 +49,6 @@ namespace MCPForUnityTests.Editor.Services.Characterization
         {
             // Restore settings
             EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, _savedUseHttpTransport);
-            if (!string.IsNullOrEmpty(_savedHttpUrl))
-            {
-                EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, _savedHttpUrl);
-            }
-            else
-            {
-                EditorPrefs.DeleteKey(EditorPrefKeys.HttpBaseUrl);
-            }
             if (!string.IsNullOrEmpty(_savedHttpRemoteUrl))
             {
                 EditorPrefs.SetString(EditorPrefKeys.HttpRemoteBaseUrl, _savedHttpRemoteUrl);
@@ -72,126 +67,13 @@ namespace MCPForUnityTests.Editor.Services.Characterization
             }
             EditorPrefs.SetBool(EditorPrefKeys.AllowLanHttpBind, _savedAllowLanHttpBind);
             EditorPrefs.SetBool(EditorPrefKeys.AllowInsecureRemoteHttp, _savedAllowInsecureRemoteHttp);
+
+            HttpEndpointUtility.SetPortFilePathOverrideForTesting(null);
+            try { if (!string.IsNullOrEmpty(_portFileOverride) && File.Exists(_portFileOverride)) File.Delete(_portFileOverride); } catch { }
+
             // Refresh cache to reflect restored values
             EditorConfigurationCache.Instance.Refresh();
         }
-
-        #region IsLocalUrl Tests
-
-        [Test]
-        public void IsLocalUrl_Localhost_ReturnsTrue()
-        {
-            // Arrange
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://localhost:8080");
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.IsLocalUrl();
-
-            // Assert
-            Assert.IsTrue(result, "localhost should be recognized as local URL");
-        }
-
-        [Test]
-        public void IsLocalUrl_127001_ReturnsTrue()
-        {
-            // Arrange
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://127.0.0.1:8080");
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.IsLocalUrl();
-
-            // Assert
-            Assert.IsTrue(result, "127.0.0.1 should be recognized as local URL");
-        }
-
-        [Test]
-        public void IsLocalUrl_127002_ReturnsTrue()
-        {
-            // Arrange
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://127.0.0.2:8080");
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.IsLocalUrl();
-
-            // Assert
-            Assert.IsTrue(result, "127.0.0.2 should be recognized as loopback local URL");
-        }
-
-        [Test]
-        public void IsLocalUrl_0000_ReturnsTrue()
-        {
-            // Arrange
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://0.0.0.0:8080");
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.IsLocalUrl();
-
-            // Assert
-            Assert.IsTrue(result, "0.0.0.0 should be recognized as local URL");
-        }
-
-        [Test]
-        public void IsLocalUrl_IPv6Loopback_ReturnsTrue()
-        {
-            // Arrange
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://[::1]:8080");
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.IsLocalUrl();
-
-            // Assert
-            Assert.IsTrue(result, "::1 (IPv6 loopback) should be recognized as local URL");
-        }
-
-        [Test]
-        public void IsLocalUrl_IPv6LoopbackLongForm_ReturnsTrue()
-        {
-            // Arrange
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://[0:0:0:0:0:0:0:1]:8080");
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.IsLocalUrl();
-
-            // Assert
-            Assert.IsTrue(result, "0:0:0:0:0:0:0:1 (IPv6 loopback long-form) should be recognized as local URL");
-        }
-
-        [Test]
-        public void IsLocalUrl_RemoteUrl_ReturnsFalse()
-        {
-            // Arrange
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://example.com:8080");
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.IsLocalUrl();
-
-            // Assert
-            Assert.IsFalse(result, "Remote URL should not be recognized as local");
-        }
-
-        [Test]
-        public void IsLocalUrl_EmptyString_ReturnsFalse()
-        {
-            // Arrange
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, string.Empty);
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.IsLocalUrl();
-
-            // Assert - behavior depends on default URL handling
-            // Document current behavior
-            Assert.Pass($"IsLocalUrl returned {result} for empty URL (documents current behavior)");
-        }
-
-        #endregion
 
         #region CanStartLocalServer Tests
 
@@ -200,7 +82,7 @@ namespace MCPForUnityTests.Editor.Services.Characterization
         {
             // Arrange
             EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, false);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://localhost:8080");
+            HttpEndpointUtility.SaveLocalBaseUrl("http://localhost:8080");
             EditorConfigurationCache.Instance.Refresh();
             _service = new ServerManagementService();
 
@@ -216,7 +98,7 @@ namespace MCPForUnityTests.Editor.Services.Characterization
         {
             // Arrange
             EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, true);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://localhost:8080");
+            HttpEndpointUtility.SaveLocalBaseUrl("http://localhost:8080");
             EditorConfigurationCache.Instance.Refresh();
             _service = new ServerManagementService();
 
@@ -225,56 +107,6 @@ namespace MCPForUnityTests.Editor.Services.Characterization
 
             // Assert
             Assert.IsTrue(result, "Can start local server when HTTP enabled and URL is local");
-        }
-
-        [Test]
-        public void CanStartLocalServer_HttpEnabledRemoteUrl_ReturnsFalse()
-        {
-            // Arrange
-            EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, true);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://remote.server.com:8080");
-            EditorConfigurationCache.Instance.Refresh();
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.CanStartLocalServer();
-
-            // Assert
-            Assert.IsFalse(result, "Cannot start local server when URL is remote");
-        }
-
-        [Test]
-        public void CanStartLocalServer_HttpEnabledZeroBind_DisallowedByDefault_ReturnsFalse()
-        {
-            // Arrange
-            EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, true);
-            EditorPrefs.SetBool(EditorPrefKeys.AllowLanHttpBind, false);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://0.0.0.0:8080");
-            EditorConfigurationCache.Instance.Refresh();
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.CanStartLocalServer();
-
-            // Assert
-            Assert.IsFalse(result, "Cannot start local server on 0.0.0.0 unless LAN bind opt-in is enabled");
-        }
-
-        [Test]
-        public void CanStartLocalServer_HttpEnabledZeroBind_WithOptIn_ReturnsTrue()
-        {
-            // Arrange
-            EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, true);
-            EditorPrefs.SetBool(EditorPrefKeys.AllowLanHttpBind, true);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://0.0.0.0:8080");
-            EditorConfigurationCache.Instance.Refresh();
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.CanStartLocalServer();
-
-            // Assert
-            Assert.IsTrue(result, "Can start local server on 0.0.0.0 when LAN bind opt-in is enabled");
         }
 
         #endregion
@@ -362,7 +194,7 @@ namespace MCPForUnityTests.Editor.Services.Characterization
         {
             // Arrange
             EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, false);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://localhost:8080");
+            HttpEndpointUtility.SaveLocalBaseUrl("http://localhost:8080");
             EditorConfigurationCache.Instance.Refresh();
             _service = new ServerManagementService();
 
@@ -377,30 +209,11 @@ namespace MCPForUnityTests.Editor.Services.Characterization
         }
 
         [Test]
-        public void TryGetLocalHttpServerCommand_RemoteUrl_ReturnsFalseWithError()
-        {
-            // Arrange
-            EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, true);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://remote.server.com:8080");
-            EditorConfigurationCache.Instance.Refresh();
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.TryGetLocalHttpServerCommand(out string command, out string error);
-
-            // Assert
-            Assert.IsFalse(result, "Should return false for remote URL");
-            Assert.IsNull(command, "Command should be null when failing");
-            Assert.IsNotNull(error, "Error message should be provided");
-            Assert.That(error, Does.Contain("local").IgnoreCase, "Error should mention local address requirement");
-        }
-
-        [Test]
         public void TryGetLocalHttpServerCommand_LocalUrl_ReturnsCommandOrError()
         {
             // Arrange
             EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, true);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://localhost:8080");
+            HttpEndpointUtility.SaveLocalBaseUrl("http://localhost:8080");
             _service = new ServerManagementService();
 
             // Act
@@ -429,7 +242,7 @@ namespace MCPForUnityTests.Editor.Services.Characterization
         public void IsLocalHttpServerReachable_NoServer_ReturnsFalse()
         {
             // Arrange - Use a port that's unlikely to have a server running
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://localhost:59999");
+            HttpEndpointUtility.SaveLocalBaseUrl("http://localhost:59999");
             _service = new ServerManagementService();
 
             // Act
@@ -437,20 +250,6 @@ namespace MCPForUnityTests.Editor.Services.Characterization
 
             // Assert
             Assert.IsFalse(result, "Should return false when no server is listening");
-        }
-
-        [Test]
-        public void IsLocalHttpServerReachable_RemoteUrl_ReturnsFalse()
-        {
-            // Arrange
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://remote.server.com:8080");
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.IsLocalHttpServerReachable();
-
-            // Assert
-            Assert.IsFalse(result, "Should return false for non-local URL without attempting connection");
         }
 
         [Test]
@@ -469,20 +268,6 @@ namespace MCPForUnityTests.Editor.Services.Characterization
         #endregion
 
         #region IsLocalHttpServerRunning Tests
-
-        [Test]
-        public void IsLocalHttpServerRunning_RemoteUrl_ReturnsFalse()
-        {
-            // Arrange
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://remote.server.com:8080");
-            _service = new ServerManagementService();
-
-            // Act
-            bool result = _service.IsLocalHttpServerRunning();
-
-            // Assert
-            Assert.IsFalse(result, "Should return false for non-local URL");
-        }
 
         [Test]
         public void IsLocalHttpServerRunning_DoesNotThrow()

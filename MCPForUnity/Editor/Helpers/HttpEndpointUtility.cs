@@ -1,9 +1,13 @@
 using System;
+using System.Globalization;
+using System.IO;
 using System.Net;
+using System.Text;
 using MCPForUnity.Editor.Constants;
 using MCPForUnity.Editor.Models;
 using MCPForUnity.Editor.Services;
 using UnityEditor;
+using UnityEngine;
 
 namespace MCPForUnity.Editor.Helpers
 {
@@ -12,15 +16,99 @@ namespace MCPForUnity.Editor.Helpers
     /// Ensures the stored value is always the base URL (without trailing path),
     /// and provides convenience accessors for specific endpoints.
     ///
-    /// HTTP Local and HTTP Remote use separate EditorPrefs keys so that switching
-    /// between scopes does not overwrite the other scope's URL.
+    /// HTTP Local stores the port in a plain text file at the project root
+    /// (`<ProjectRoot>/unity-mcp-port`); the host is fixed to `localhost`.
+    /// HTTP Remote stores its full URL in EditorPrefs.
     /// </summary>
     public static class HttpEndpointUtility
     {
-        private const string LocalPrefKey = EditorPrefKeys.HttpBaseUrl;
         private const string RemotePrefKey = EditorPrefKeys.HttpRemoteBaseUrl;
-        private const string DefaultLocalBaseUrl = "http://127.0.0.1:8080";
         private const string DefaultRemoteBaseUrl = "";
+
+        // HTTP Local persists port number in a plain text file at the project root
+        // (`<ProjectRoot>/unity-mcp-port`). The host is fixed to `localhost`.
+        private const string PortFileName = "unity-mcp-port";
+        private const string LocalHost = "localhost";
+        private const int DefaultLocalPort = 8080;
+        private static string _portFilePathOverride;
+
+        /// <summary>
+        /// Test hook: override the port file path. Pass null to restore the default
+        /// (project-root-relative) location.
+        /// </summary>
+        internal static void SetPortFilePathOverrideForTesting(string path)
+        {
+            _portFilePathOverride = path;
+        }
+
+        private static string GetPortFilePath()
+        {
+            if (!string.IsNullOrEmpty(_portFilePathOverride))
+            {
+                return _portFilePathOverride;
+            }
+            string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? string.Empty;
+            return Path.Combine(projectRoot, PortFileName);
+        }
+
+        private static int LoadLocalPort()
+        {
+            try
+            {
+                string path = GetPortFilePath();
+                if (!File.Exists(path))
+                {
+                    return DefaultLocalPort;
+                }
+                string text = File.ReadAllText(path).Trim();
+                if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int port)
+                    && port > 0
+                    && port <= 65535)
+                {
+                    return port;
+                }
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"Failed to read port file: {ex.Message}");
+            }
+            return DefaultLocalPort;
+        }
+
+        private static void SaveLocalPort(int port)
+        {
+            if (port <= 0 || port > 65535)
+            {
+                return;
+            }
+            try
+            {
+                string path = GetPortFilePath();
+                File.WriteAllText(path,
+                    port.ToString(CultureInfo.InvariantCulture) + "\n",
+                    new UTF8Encoding(false));
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"Failed to write port file: {ex.Message}");
+            }
+        }
+
+        private static int ParsePortFromUrl(string userValue)
+        {
+            if (string.IsNullOrWhiteSpace(userValue))
+            {
+                return DefaultLocalPort;
+            }
+            string normalized = NormalizeBaseUrl(userValue, $"http://{LocalHost}:{DefaultLocalPort}", remoteScope: false);
+            if (Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
+                && uri.Port > 0
+                && uri.Port <= 65535)
+            {
+                return uri.Port;
+            }
+            return DefaultLocalPort;
+        }
 
         /// <summary>
         /// Returns the normalized base URL for the currently active HTTP scope.
@@ -47,23 +135,25 @@ namespace MCPForUnity.Editor.Helpers
         }
 
         /// <summary>
-        /// Returns the normalized local HTTP base URL (always reads local pref).
+        /// Returns the local HTTP base URL composed from the project-root port file.
+        /// The host is always `localhost`. If the file is missing or malformed,
+        /// falls back to the default port.
         /// </summary>
         public static string GetLocalBaseUrl()
         {
-            string scopedKey = ProjectIdentityUtility.GetProjectScopedKey(LocalPrefKey);
-            string stored = EditorPrefs.GetString(scopedKey, DefaultLocalBaseUrl);
-            return NormalizeBaseUrl(stored, DefaultLocalBaseUrl, remoteScope: false);
+            int port = LoadLocalPort();
+            return $"http://{LocalHost}:{port}";
         }
 
         /// <summary>
-        /// Saves a user-provided URL to the local HTTP pref.
+        /// Persists the port portion of a user-provided URL to the project-root port file.
+        /// The host part of the input is ignored; the local URL is always reconstructed
+        /// with `localhost`.
         /// </summary>
         public static void SaveLocalBaseUrl(string userValue)
         {
-            string normalized = NormalizeBaseUrl(userValue, DefaultLocalBaseUrl, remoteScope: false);
-            string scopedKey = ProjectIdentityUtility.GetProjectScopedKey(LocalPrefKey);
-            EditorPrefs.SetString(scopedKey, normalized);
+            int port = ParsePortFromUrl(userValue);
+            SaveLocalPort(port);
         }
 
         /// <summary>

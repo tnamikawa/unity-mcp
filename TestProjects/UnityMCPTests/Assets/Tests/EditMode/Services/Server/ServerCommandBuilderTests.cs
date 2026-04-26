@@ -1,4 +1,7 @@
+using System;
+using System.IO;
 using NUnit.Framework;
+using MCPForUnity.Editor.Helpers;
 using MCPForUnity.Editor.Services;
 using MCPForUnity.Editor.Services.Server;
 using MCPForUnity.Editor.Constants;
@@ -14,7 +17,7 @@ namespace MCPForUnityTests.Editor.Services.Server
     {
         private ServerCommandBuilder _builder;
         private bool _savedUseHttpTransport;
-        private string _savedHttpUrl;
+        private string _portFileOverride;
 
         [SetUp]
         public void SetUp()
@@ -22,7 +25,9 @@ namespace MCPForUnityTests.Editor.Services.Server
             _builder = new ServerCommandBuilder();
             // Save current settings
             _savedUseHttpTransport = EditorPrefs.GetBool(EditorPrefKeys.UseHttpTransport, true);
-            _savedHttpUrl = EditorPrefs.GetString(EditorPrefKeys.HttpBaseUrl, string.Empty);
+            // Redirect port persistence to a temp file
+            _portFileOverride = Path.Combine(Path.GetTempPath(), "UnityMCPTests-port-" + Guid.NewGuid().ToString("N"));
+            HttpEndpointUtility.SetPortFilePathOverrideForTesting(_portFileOverride);
         }
 
         [TearDown]
@@ -30,14 +35,8 @@ namespace MCPForUnityTests.Editor.Services.Server
         {
             // Restore settings
             EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, _savedUseHttpTransport);
-            if (!string.IsNullOrEmpty(_savedHttpUrl))
-            {
-                EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, _savedHttpUrl);
-            }
-            else
-            {
-                EditorPrefs.DeleteKey(EditorPrefKeys.HttpBaseUrl);
-            }
+            HttpEndpointUtility.SetPortFilePathOverrideForTesting(null);
+            try { if (!string.IsNullOrEmpty(_portFileOverride) && File.Exists(_portFileOverride)) File.Delete(_portFileOverride); } catch { }
             // Refresh cache to reflect restored values
             EditorConfigurationCache.Instance.Refresh();
         }
@@ -223,7 +222,7 @@ namespace MCPForUnityTests.Editor.Services.Server
         {
             // Arrange
             EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, false);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://localhost:8080");
+            HttpEndpointUtility.SaveLocalBaseUrl("http://localhost:8080");
             EditorConfigurationCache.Instance.Refresh();
 
             // Act
@@ -239,28 +238,11 @@ namespace MCPForUnityTests.Editor.Services.Server
         }
 
         [Test]
-        public void TryBuildCommand_RemoteUrl_ReturnsFalse()
-        {
-            // Arrange
-            EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, true);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://remote.server.com:8080");
-            EditorConfigurationCache.Instance.Refresh();
-
-            // Act
-            bool result = _builder.TryBuildCommand(out string fileName, out string arguments, out string displayCommand, out string error);
-
-            // Assert
-            Assert.IsFalse(result);
-            Assert.IsNotNull(error);
-            Assert.That(error, Does.Contain("local").IgnoreCase);
-        }
-
-        [Test]
         public void TryBuildCommand_LocalUrl_ReturnsCommandOrError()
         {
             // Arrange
             EditorPrefs.SetBool(EditorPrefKeys.UseHttpTransport, true);
-            EditorPrefs.SetString(EditorPrefKeys.HttpBaseUrl, "http://localhost:8080");
+            HttpEndpointUtility.SaveLocalBaseUrl("http://localhost:8080");
             EditorConfigurationCache.Instance.Refresh();
 
             // Act

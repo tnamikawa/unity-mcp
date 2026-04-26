@@ -16,17 +16,15 @@ namespace MCPForUnityTests.Editor.Helpers
     public class WriteToConfigTests
     {
         private const string UseHttpTransportPrefKey = EditorPrefKeys.UseHttpTransport;
-        private const string HttpUrlPrefKey = EditorPrefKeys.HttpBaseUrl;
 
         private string _tempRoot;
         private string _fakeUvPath;
         private string _serverSrcDir;
+        private string _portFileOverride;
 
         // Save/restore original pref values (must happen BEFORE Assert.Ignore since TearDown still runs)
         private bool _hadHttpTransport;
         private bool _originalHttpTransport;
-        private bool _hadHttpUrl;
-        private string _originalHttpUrl;
 
         [SetUp]
         public void SetUp()
@@ -34,8 +32,10 @@ namespace MCPForUnityTests.Editor.Helpers
             // Save original pref values FIRST - TearDown runs even when test is ignored!
             _hadHttpTransport = EditorPrefs.HasKey(UseHttpTransportPrefKey);
             _originalHttpTransport = EditorPrefs.GetBool(UseHttpTransportPrefKey, true);
-            _hadHttpUrl = EditorPrefs.HasKey(HttpUrlPrefKey);
-            _originalHttpUrl = EditorPrefs.GetString(HttpUrlPrefKey, "");
+
+            // Redirect HTTP Local port persistence to a temp file so tests don't touch the project root
+            _portFileOverride = Path.Combine(Path.GetTempPath(), "UnityMCPTests-port-" + Guid.NewGuid().ToString("N"));
+            HttpEndpointUtility.SetPortFilePathOverrideForTesting(_portFileOverride);
 
             // Tests are designed for Linux/macOS runners. Skip on Windows due to ProcessStartInfo
             // restrictions when UseShellExecute=false for .cmd/.bat scripts.
@@ -65,7 +65,7 @@ namespace MCPForUnityTests.Editor.Helpers
             EditorPrefs.SetBool(EditorPrefKeys.AutoRegisterEnabled, false);
             // Force HTTP transport defaults so expectations match current behavior
             EditorPrefs.SetBool(UseHttpTransportPrefKey, true);
-            EditorPrefs.SetString(HttpUrlPrefKey, "http://localhost:8080");
+            HttpEndpointUtility.SaveLocalBaseUrl("http://localhost:8080");
             EditorConfigCache.Instance.Refresh();
         }
 
@@ -83,10 +83,9 @@ namespace MCPForUnityTests.Editor.Helpers
             else
                 EditorPrefs.DeleteKey(UseHttpTransportPrefKey);
 
-            if (_hadHttpUrl)
-                EditorPrefs.SetString(HttpUrlPrefKey, _originalHttpUrl);
-            else
-                EditorPrefs.DeleteKey(HttpUrlPrefKey);
+            // Restore default port file path and clean up the temp file
+            HttpEndpointUtility.SetPortFilePathOverrideForTesting(null);
+            try { if (!string.IsNullOrEmpty(_portFileOverride) && File.Exists(_portFileOverride)) File.Delete(_portFileOverride); } catch { }
 
             // Remove temp files
             try { if (Directory.Exists(_tempRoot)) Directory.Delete(_tempRoot, true); } catch { }

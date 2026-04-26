@@ -58,7 +58,6 @@ namespace MCPForUnity.Editor.Windows
             { EditorPrefKeys.EditorWindowActivePanel, EditorPrefType.String },
             { EditorPrefKeys.ClaudeCliPathOverride, EditorPrefType.String },
             { EditorPrefKeys.UvxPathOverride, EditorPrefType.String },
-            { EditorPrefKeys.HttpBaseUrl, EditorPrefType.String },
             { EditorPrefKeys.HttpRemoteBaseUrl, EditorPrefType.String },
             { EditorPrefKeys.HttpTransportScope, EditorPrefType.String },
             { EditorPrefKeys.SessionId, EditorPrefType.String },
