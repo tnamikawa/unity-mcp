@@ -43,7 +43,7 @@ async def _send_build_command(
     ),
     annotations=ToolAnnotations(
         title="Manage Build",
-        destructiveHint=True,
+        destructiveHint=False,
         readOnlyHint=False,
     ),
 )

@@ -51,7 +51,7 @@ ALL_ACTIONS = ["ping"] + PARTICLE_ACTIONS + VFX_ACTIONS + LINE_ACTIONS + TRAIL_A
     ),
     annotations=ToolAnnotations(
         title="Manage VFX",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_vfx(

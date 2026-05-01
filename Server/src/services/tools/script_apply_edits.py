@@ -721,7 +721,7 @@ def _err(code: str, message: str, *, expected: dict[str, Any] | None = None, rew
     ),
     annotations=ToolAnnotations(
         title="Script Apply Edits",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def script_apply_edits(

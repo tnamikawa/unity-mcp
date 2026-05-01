@@ -42,7 +42,7 @@ REQUIRED_PARAMS = {
     ),
     annotations=ToolAnnotations(
         title="Manage Prefabs",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_prefabs(

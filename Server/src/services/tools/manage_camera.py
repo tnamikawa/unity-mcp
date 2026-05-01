@@ -73,7 +73,7 @@ ALL_ACTIONS = SETUP_ACTIONS + CREATION_ACTIONS + CONFIGURATION_ACTIONS + EXTENSI
     ),
     annotations=ToolAnnotations(
         title="Manage Camera",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_camera(

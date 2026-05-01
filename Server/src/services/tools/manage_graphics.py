@@ -76,7 +76,7 @@ ALL_ACTIONS = (
         "- skybox_set_reflection: Set environment reflection settings\n"
         "- skybox_set_sun: Set the sun source light"
     ),
-    annotations=ToolAnnotations(title="Manage Graphics", destructiveHint=True),
+    annotations=ToolAnnotations(title="Manage Graphics", destructiveHint=False),
 )
 async def manage_graphics(
     ctx: Context,

@@ -42,7 +42,7 @@ ALL_ACTIONS = ANIMATOR_ACTIONS + CONTROLLER_ACTIONS + CLIP_ACTIONS #Not loaded i
     ),
     annotations=ToolAnnotations(
         title="Manage Animation",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_animation(

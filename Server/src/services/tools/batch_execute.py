@@ -71,7 +71,7 @@ def invalidate_cached_max_commands() -> None:
     ),
     annotations=ToolAnnotations(
         title="Batch Execute",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def batch_execute(

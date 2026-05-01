@@ -22,7 +22,7 @@ from services.tools.preflight import preflight
     ),
     annotations=ToolAnnotations(
         title="Manage Scene",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_scene(

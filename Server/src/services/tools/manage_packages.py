@@ -49,7 +49,7 @@ async def _send_packages_command(
     ),
     annotations=ToolAnnotations(
         title="Manage Packages",
-        destructiveHint=True,
+        destructiveHint=False,
         readOnlyHint=False,
     ),
 )

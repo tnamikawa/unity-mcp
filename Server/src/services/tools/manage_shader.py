@@ -16,7 +16,7 @@ from transport.legacy.unity_connection import async_send_command_with_retry
     annotations=ToolAnnotations(
         title="Manage Shader",
         # Note: 'read' action is non-destructive; 'create', 'update', 'delete' are destructive
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_shader(

@@ -27,7 +27,7 @@ from transport.legacy.unity_connection import async_send_command_with_retry
     description="Creates and modifies ScriptableObject assets using Unity SerializedObject property paths.",
     annotations=ToolAnnotations(
         title="Manage Scriptable Object",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_scriptable_object(

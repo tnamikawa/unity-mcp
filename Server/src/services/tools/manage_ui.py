@@ -48,7 +48,7 @@ _VALID_EXTENSIONS = {".uxml", ".uss"}
     ),
     annotations=ToolAnnotations(
         title="Manage UI",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_ui(

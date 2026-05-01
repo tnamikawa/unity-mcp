@@ -31,7 +31,7 @@ from transport.legacy.unity_connection import async_send_command_with_retry
     group="scripting_ext",
     annotations=ToolAnnotations(
         title="Execute Code",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def execute_code(

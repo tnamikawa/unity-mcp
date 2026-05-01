@@ -86,7 +86,7 @@ def _split_uri(uri: str) -> tuple[str, str]:
     ),
     annotations=ToolAnnotations(
         title="Apply Text Edits",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def apply_text_edits(
@@ -386,7 +386,7 @@ async def apply_text_edits(
     description="Create a new C# script at the given project path.",
     annotations=ToolAnnotations(
         title="Create Script",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def create_script(
@@ -444,7 +444,7 @@ async def create_script(
     description="Delete a C# script by URI or Assets-relative path.",
     annotations=ToolAnnotations(
         title="Delete Script",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def delete_script(
@@ -526,7 +526,7 @@ async def validate_script(
     description="Compatibility router for legacy script operations. Prefer apply_text_edits (ranges) or script_apply_edits (structured) for edits. Read-only action: read. Modifying actions: create, delete.",
     annotations=ToolAnnotations(
         title="Manage Script",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_script(

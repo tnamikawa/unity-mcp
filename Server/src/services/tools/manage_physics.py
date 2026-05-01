@@ -49,7 +49,7 @@ ALL_ACTIONS: list[str] = list(get_args(PhysicsAction))
         "VALIDATION: validate\n"
         "SIMULATION: simulate_step\n"
     ),
-    annotations=ToolAnnotations(title="Manage Physics", destructiveHint=True),
+    annotations=ToolAnnotations(title="Manage Physics", destructiveHint=False),
 )
 async def manage_physics(
     ctx: Context,

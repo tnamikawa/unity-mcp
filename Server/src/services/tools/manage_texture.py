@@ -383,7 +383,7 @@ def _normalize_import_settings(value: Any) -> tuple[dict | None, str | None]:
     ),
     annotations=ToolAnnotations(
         title="Manage Texture",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_texture(

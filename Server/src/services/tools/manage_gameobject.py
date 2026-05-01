@@ -48,7 +48,7 @@ def _normalize_component_properties(value: Any) -> tuple[dict[str, dict[str, Any
     ),
     annotations=ToolAnnotations(
         title="Manage GameObject",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_gameobject(

@@ -107,7 +107,7 @@ ALL_ACTIONS = (
     ),
     annotations=ToolAnnotations(
         title="Manage ProBuilder",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_probuilder(

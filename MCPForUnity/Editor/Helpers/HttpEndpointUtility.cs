@@ -17,7 +17,7 @@ namespace MCPForUnity.Editor.Helpers
     /// and provides convenience accessors for specific endpoints.
     ///
     /// HTTP Local stores the port in a plain text file at the project root
-    /// (`<ProjectRoot>/.unity-mcp-port`); the host is fixed to `localhost`.
+    /// (`<ProjectRoot>/.unity-mcp-port`); the host is fixed to `127.0.0.1`.
     /// HTTP Remote stores its full URL in EditorPrefs.
     /// </summary>
     public static class HttpEndpointUtility
@@ -26,9 +26,11 @@ namespace MCPForUnity.Editor.Helpers
         private const string DefaultRemoteBaseUrl = "";
 
         // HTTP Local persists port number in a plain text file at the project root
-        // (`<ProjectRoot>/.unity-mcp-port`). The host is fixed to `localhost`.
+        // (`<ProjectRoot>/.unity-mcp-port`). The host is fixed to `127.0.0.1` so that
+        // clients without Happy Eyeballs (Codex/reqwest on Windows) avoid the IPv6 path
+        // returned first by getaddrinfo for "localhost" while the server binds v4-only.
         private const string PortFileName = ".unity-mcp-port";
-        private const string LocalHost = "localhost";
+        private const string LocalHost = "127.0.0.1";
         private const int DefaultLocalPort = 8080;
         private static string _portFilePathOverride;
 
@@ -136,7 +138,7 @@ namespace MCPForUnity.Editor.Helpers
 
         /// <summary>
         /// Returns the local HTTP base URL composed from the project-root port file.
-        /// The host is always `localhost`. If the file is missing or malformed,
+        /// The host is always `127.0.0.1`. If the file is missing or malformed,
         /// falls back to the default port.
         /// </summary>
         public static string GetLocalBaseUrl()
@@ -148,7 +150,7 @@ namespace MCPForUnity.Editor.Helpers
         /// <summary>
         /// Persists the port portion of a user-provided URL to the project-root port file.
         /// The host part of the input is ignored; the local URL is always reconstructed
-        /// with `localhost`.
+        /// with `127.0.0.1`.
         /// </summary>
         public static void SaveLocalBaseUrl(string userValue)
         {

@@ -24,7 +24,7 @@ from services.tools.preflight import preflight
     ),
     annotations=ToolAnnotations(
         title="Manage Asset",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def manage_asset(

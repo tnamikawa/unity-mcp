@@ -169,7 +169,7 @@ async def verify_edit_by_sha(
     description="Request a Unity asset database refresh and optionally a script compilation. Can optionally wait for readiness.",
     annotations=ToolAnnotations(
         title="Refresh Unity",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def refresh_unity(

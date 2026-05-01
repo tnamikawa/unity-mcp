@@ -148,7 +148,7 @@ class GetTestJobResponse(MCPResponse):
     description="Starts a Unity test run asynchronously and returns a job_id immediately. Poll with get_test_job for progress.",
     annotations=ToolAnnotations(
         title="Run Tests",
-        destructiveHint=True,
+        destructiveHint=False,
     ),
 )
 async def run_tests(
