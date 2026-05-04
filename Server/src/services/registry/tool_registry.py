@@ -11,6 +11,8 @@ cannot be disabled by the group system (used for server meta-tools like
 """
 from typing import Callable, Any
 
+from mcp.types import ToolAnnotations
+
 # Global registry to collect decorated tools
 _tool_registry: list[dict[str, Any]] = []
 
@@ -28,6 +30,20 @@ TOOL_GROUPS: dict[str, str] = {
 }
 
 DEFAULT_ENABLED_GROUPS: set[str] = {"core"}
+
+
+def _with_closed_world_hint(annotations: Any | None) -> Any:
+    if annotations is None:
+        return ToolAnnotations(openWorldHint=False)
+    if isinstance(annotations, ToolAnnotations):
+        return annotations.model_copy(update={"openWorldHint": False})
+    if isinstance(annotations, dict):
+        updated = dict(annotations)
+        updated["openWorldHint"] = False
+        return updated
+    raise TypeError(
+        "Tool annotations must be a ToolAnnotations instance, a dict, or None."
+    )
 
 
 def mcp_for_unity_tool(
@@ -68,6 +84,9 @@ def mcp_for_unity_tool(
             del tool_kwargs["unity_target"]
         if "group" in tool_kwargs:
             del tool_kwargs["group"]
+        tool_kwargs["annotations"] = _with_closed_world_hint(
+            tool_kwargs.get("annotations")
+        )
 
         # Validate and normalize group
         resolved_group: str | None = None

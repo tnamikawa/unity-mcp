@@ -6,6 +6,7 @@ from hashlib import sha256
 from typing import Optional
 
 from fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -360,6 +361,7 @@ class CustomToolService:
             wrapped = self._mcp.tool(
                 name=definition.name,
                 description=definition.description,
+                annotations=ToolAnnotations(openWorldHint=False),
             )(wrapped)
         except Exception as exc:  # pragma: no cover - defensive against tool conflicts
             logger.warning(

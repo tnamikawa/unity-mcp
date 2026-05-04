@@ -1,4 +1,5 @@
 import pytest
+from mcp.types import ToolAnnotations
 
 from services.registry import get_registered_tools, mcp_for_unity_tool
 import services.registry.tool_registry as tool_registry_module
@@ -49,7 +50,38 @@ def test_tool_registry_does_not_leak_unity_target_into_tool_kwargs():
     tool_info = next(item for item in registered_tools if item["name"] == "_non_leaking_target_tool")
     assert tool_info["unity_target"] == "manage_script"
     assert "unity_target" not in tool_info["kwargs"]
-    assert tool_info["kwargs"]["annotations"] == {"title": "x"}
+    assert tool_info["kwargs"]["annotations"] == {"title": "x", "openWorldHint": False}
+
+
+def test_tool_registry_adds_closed_world_hint_to_default_annotations():
+    @mcp_for_unity_tool()
+    def _default_annotations_tool():
+        return None
+
+    registered_tools = get_registered_tools()
+    tool_info = next(item for item in registered_tools if item["name"] == "_default_annotations_tool")
+    annotations = tool_info["kwargs"]["annotations"]
+    assert isinstance(annotations, ToolAnnotations)
+    assert annotations.openWorldHint is False
+
+
+def test_tool_registry_forces_closed_world_hint_on_tool_annotations():
+    @mcp_for_unity_tool(
+        annotations=ToolAnnotations(
+            title="x",
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
+    def _tool_annotations_tool():
+        return None
+
+    registered_tools = get_registered_tools()
+    tool_info = next(item for item in registered_tools if item["name"] == "_tool_annotations_tool")
+    annotations = tool_info["kwargs"]["annotations"]
+    assert annotations.title == "x"
+    assert annotations.destructiveHint is False
+    assert annotations.openWorldHint is False
 
 
 def test_tool_registry_rejects_invalid_unity_target_values():
