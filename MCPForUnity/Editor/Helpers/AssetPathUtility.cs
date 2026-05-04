@@ -226,6 +226,11 @@ namespace MCPForUnity.Editor.Helpers
                 return resolved;
             }
 
+            if (TryGetInstalledPackageServerSource(out string installedPackageServerSource))
+            {
+                return installedPackageServerSource;
+            }
+
             // Default to PyPI package (avoids Windows long path issues with git clone)
             string version = GetPackageVersion();
             if (version == "unknown")
@@ -242,6 +247,87 @@ namespace MCPForUnity.Editor.Helpers
             }
 
             return $"mcpforunityserver=={version}";
+        }
+
+        private static bool TryGetInstalledPackageServerSource(out string serverSource)
+        {
+            serverSource = null;
+
+            var packageInfo = PackageInfo.FindForAssembly(typeof(AssetPathUtility).Assembly);
+            if (packageInfo == null)
+                return false;
+
+            string source = packageInfo.source.ToString();
+            if (string.Equals(source, "Git", StringComparison.OrdinalIgnoreCase))
+            {
+                serverSource = BuildUvGitServerSource(packageInfo.packageId, packageInfo.name);
+                return !string.IsNullOrEmpty(serverSource);
+            }
+
+            if (string.Equals(source, "Local", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(source, "Embedded", StringComparison.OrdinalIgnoreCase))
+            {
+                serverSource = GetSiblingServerPath(packageInfo.resolvedPath);
+                return !string.IsNullOrEmpty(serverSource);
+            }
+
+            return false;
+        }
+
+        internal static string BuildUvGitServerSource(string packageId, string packageName)
+        {
+            if (string.IsNullOrEmpty(packageId) || string.IsNullOrEmpty(packageName))
+                return null;
+
+            string prefix = packageName + "@";
+            if (!packageId.StartsWith(prefix, StringComparison.Ordinal))
+                return null;
+
+            string unityPackageUrl = packageId.Substring(prefix.Length);
+            string revision = null;
+            int revisionIndex = unityPackageUrl.LastIndexOf('#');
+            if (revisionIndex >= 0)
+            {
+                revision = unityPackageUrl.Substring(revisionIndex + 1);
+                unityPackageUrl = unityPackageUrl.Substring(0, revisionIndex);
+            }
+
+            Uri uri;
+            if (!Uri.TryCreate(unityPackageUrl, UriKind.Absolute, out uri))
+                return null;
+
+            var builder = new UriBuilder(uri)
+            {
+                Query = string.Empty,
+                Fragment = string.Empty
+            };
+
+            string uvSource = "git+" + builder.Uri.GetLeftPart(UriPartial.Path);
+            if (!string.IsNullOrEmpty(revision))
+            {
+                uvSource += "@" + revision;
+            }
+
+            return uvSource + "#subdirectory=Server";
+        }
+
+        private static string GetSiblingServerPath(string packageResolvedPath)
+        {
+            if (string.IsNullOrEmpty(packageResolvedPath))
+                return null;
+
+            DirectoryInfo packageDirectory = new DirectoryInfo(packageResolvedPath);
+            DirectoryInfo parent = packageDirectory.Parent;
+            if (parent == null)
+                return null;
+
+            string siblingServerPath = Path.Combine(parent.FullName, "Server");
+            if (File.Exists(Path.Combine(siblingServerPath, "pyproject.toml")))
+            {
+                return siblingServerPath;
+            }
+
+            return null;
         }
 
         /// <summary>
