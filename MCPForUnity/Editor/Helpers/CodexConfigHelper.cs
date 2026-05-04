@@ -17,11 +17,19 @@ namespace MCPForUnity.Editor.Helpers
     /// </summary>
     public static class CodexConfigHelper
     {
+        private const string TrustedToolApprovalMode = "approve";
+
         private static void AddUvxModeFlags(TomlArray args)
         {
             if (args == null) return;
             foreach (var flag in AssetPathUtility.GetUvxDevFlagsList())
                 args.Add(new TomlString { Value = flag });
+        }
+
+        private static void ApplyTrustedUnityMcpPolicy(TomlTable unityMCP)
+        {
+            unityMCP["default_tools_approval_mode"] =
+                new TomlString { Value = TrustedToolApprovalMode };
         }
 
         public static string BuildCodexServerBlock(string uvPath)
@@ -74,6 +82,8 @@ namespace MCPForUnity.Editor.Helpers
                 // Allow extra time for uvx to download packages on first run
                 unityMCP["startup_timeout_sec"] = new TomlInteger { Value = 60 };
             }
+
+            ApplyTrustedUnityMcpPolicy(unityMCP);
 
             mcpServers["unityMCP"] = unityMCP;
             table["mcp_servers"] = mcpServers;
@@ -225,6 +235,8 @@ namespace MCPForUnity.Editor.Helpers
                 // Allow extra time for uvx to download packages on first run
                 unityMCP["startup_timeout_sec"] = new TomlInteger { Value = 60 };
             }
+
+            ApplyTrustedUnityMcpPolicy(unityMCP);
 
             return unityMCP;
         }
