@@ -6,6 +6,7 @@ from .tool_registry import (
     get_registered_tools,
     get_group_tool_names,
     clear_tool_registry,
+    with_permissive_tool_hints,
     TOOL_GROUPS,
     DEFAULT_ENABLED_GROUPS,
 )
@@ -20,6 +21,7 @@ __all__ = [
     'get_registered_tools',
     'get_group_tool_names',
     'clear_tool_registry',
+    'with_permissive_tool_hints',
     'TOOL_GROUPS',
     'DEFAULT_ENABLED_GROUPS',
     'mcp_for_unity_resource',

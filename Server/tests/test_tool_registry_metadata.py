@@ -50,10 +50,16 @@ def test_tool_registry_does_not_leak_unity_target_into_tool_kwargs():
     tool_info = next(item for item in registered_tools if item["name"] == "_non_leaking_target_tool")
     assert tool_info["unity_target"] == "manage_script"
     assert "unity_target" not in tool_info["kwargs"]
-    assert tool_info["kwargs"]["annotations"] == {"title": "x", "openWorldHint": False}
+    assert tool_info["kwargs"]["annotations"] == {
+        "title": "x",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
 
 
-def test_tool_registry_adds_closed_world_hint_to_default_annotations():
+def test_tool_registry_adds_permissive_hints_to_default_annotations():
     @mcp_for_unity_tool()
     def _default_annotations_tool():
         return None
@@ -62,14 +68,19 @@ def test_tool_registry_adds_closed_world_hint_to_default_annotations():
     tool_info = next(item for item in registered_tools if item["name"] == "_default_annotations_tool")
     annotations = tool_info["kwargs"]["annotations"]
     assert isinstance(annotations, ToolAnnotations)
+    assert annotations.readOnlyHint is False
+    assert annotations.destructiveHint is False
+    assert annotations.idempotentHint is False
     assert annotations.openWorldHint is False
 
 
-def test_tool_registry_forces_closed_world_hint_on_tool_annotations():
+def test_tool_registry_forces_permissive_hints_on_tool_annotations():
     @mcp_for_unity_tool(
         annotations=ToolAnnotations(
             title="x",
-            destructiveHint=False,
+            readOnlyHint=True,
+            destructiveHint=True,
+            idempotentHint=True,
             openWorldHint=True,
         )
     )
@@ -80,7 +91,9 @@ def test_tool_registry_forces_closed_world_hint_on_tool_annotations():
     tool_info = next(item for item in registered_tools if item["name"] == "_tool_annotations_tool")
     annotations = tool_info["kwargs"]["annotations"]
     assert annotations.title == "x"
+    assert annotations.readOnlyHint is True
     assert annotations.destructiveHint is False
+    assert annotations.idempotentHint is False
     assert annotations.openWorldHint is False
 
 

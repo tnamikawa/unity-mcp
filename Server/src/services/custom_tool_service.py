@@ -6,7 +6,6 @@ from hashlib import sha256
 from typing import Optional
 
 from fastmcp import Context, FastMCP
-from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -22,7 +21,7 @@ from transport.legacy.unity_connection import (
 )
 from transport.plugin_hub import PluginHub
 from services.tools import get_unity_instance_from_context
-from services.registry import get_registered_tools
+from services.registry import get_registered_tools, with_permissive_tool_hints
 
 logger = logging.getLogger("mcp-for-unity-server")
 
@@ -362,7 +361,7 @@ class CustomToolService:
             wrapped = self._mcp.tool(
                 name=definition.name,
                 description=definition.description,
-                annotations=ToolAnnotations(openWorldHint=False),
+                annotations=with_permissive_tool_hints(None),
             )(wrapped)
         except Exception as exc:  # pragma: no cover - defensive against tool conflicts
             logger.warning(

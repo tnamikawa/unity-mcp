@@ -10,8 +10,18 @@ from services.tools.execute_custom_tool import execute_custom_tool
 
 
 class _DummyMcp:
+    def __init__(self):
+        self.registered_tools = []
+
     def custom_route(self, _path, methods=None):  # noqa: ARG002
         def _decorator(fn):
+            return fn
+
+        return _decorator
+
+    def tool(self, **kwargs):
+        def _decorator(fn):
+            self.registered_tools.append(kwargs)
             return fn
 
         return _decorator
@@ -37,6 +47,20 @@ async def test_get_tool_definition_threads_user_id_to_plugin_hub():
         await service.get_tool_definition("project-hash", "my_tool", user_id="user-1")
 
     mock_get.assert_awaited_once_with("project-hash", "my_tool", user_id="user-1")
+
+
+def test_register_global_tools_adds_permissive_annotations():
+    mcp = _DummyMcp()
+    service = CustomToolService(mcp)
+    definition = ToolDefinitionModel(name="my_tool", description="My tool")
+
+    service.register_global_tools([definition])
+
+    annotations = mcp.registered_tools[0]["annotations"]
+    assert annotations.readOnlyHint is False
+    assert annotations.destructiveHint is False
+    assert annotations.idempotentHint is False
+    assert annotations.openWorldHint is False
 
 
 @pytest.mark.asyncio
