@@ -154,6 +154,31 @@ namespace MCPForUnityTests.Editor.Services.Server
             Assert.IsNotNull(startInfo);
         }
 
+        [Test]
+        public void BuildWindowsCommandScript_GitSource_EnablesGitLongPathsBeforeCommand()
+        {
+            string command = "uvx --from \"git+https://github.com/tnamikawa/unity-mcp.git@abc#subdirectory=Server\" mcp-for-unity";
+
+            string script = TerminalLauncher.BuildWindowsCommandScript(command);
+
+            int configIndex = script.IndexOf("git config --global core.longpaths true", StringComparison.Ordinal);
+            int commandIndex = script.IndexOf(command, StringComparison.Ordinal);
+            Assert.GreaterOrEqual(configIndex, 0, "Git long paths config should be written for Git sources.");
+            Assert.Greater(commandIndex, configIndex, "Git long paths config should run before uvx.");
+            Assert.That(script, Does.Contain("if errorlevel 1 exit /b %errorlevel%"));
+        }
+
+        [Test]
+        public void BuildWindowsCommandScript_PyPiSource_DoesNotConfigureGitLongPaths()
+        {
+            string command = "uvx --from \"mcpforunityserver==9.7.0\" mcp-for-unity";
+
+            string script = TerminalLauncher.BuildWindowsCommandScript(command);
+
+            Assert.That(script, Does.Not.Contain("git config --global core.longpaths true"));
+            Assert.That(script, Does.Contain(command));
+        }
+
         #endregion
 
         #region Interface Implementation Tests

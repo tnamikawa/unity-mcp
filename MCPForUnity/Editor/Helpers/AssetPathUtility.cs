@@ -205,7 +205,9 @@ namespace MCPForUnity.Editor.Helpers
         /// <summary>
         /// Gets the package source for the MCP server (used with uvx --from).
         /// Checks for EditorPrefs override first (supports git URLs, file:// paths, etc.),
-        /// then falls back to PyPI package reference.
+        /// then mirrors the installed Unity package source when it can identify a matching
+        /// server source, such as the same Git revision's Server subdirectory.
+        /// If neither source is available, falls back to a versioned PyPI package reference.
         /// When the override is a local path, auto-corrects to the "Server" subdirectory
         /// if the path doesn't contain pyproject.toml but Server/pyproject.toml exists.
         /// </summary>
@@ -231,7 +233,8 @@ namespace MCPForUnity.Editor.Helpers
                 return installedPackageServerSource;
             }
 
-            // Default to PyPI package (avoids Windows long path issues with git clone)
+            // Registry/Asset Store/default installs use PyPI to avoid cloning the full repository
+            // via Git, which previously hit Windows MAX_PATH limits under TestProjects/.
             string version = GetPackageVersion();
             if (version == "unknown")
             {

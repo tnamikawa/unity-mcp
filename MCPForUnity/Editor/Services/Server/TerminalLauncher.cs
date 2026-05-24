@@ -57,11 +57,7 @@ namespace MCPForUnity.Editor.Services.Server
             string scriptsDir = Path.Combine(GetProjectRootPath(), "Library", "MCPForUnity", "TerminalScripts");
             Directory.CreateDirectory(scriptsDir);
             string scriptPath = Path.Combine(scriptsDir, "mcp-terminal.cmd");
-            File.WriteAllText(
-                scriptPath,
-                "@echo off\r\n" +
-                "cls\r\n" +
-                command + "\r\n");
+            File.WriteAllText(scriptPath, BuildWindowsCommandScript(command));
             return new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "cmd.exe",
@@ -137,6 +133,28 @@ namespace MCPForUnity.Editor.Services.Server
                 CreateNoWindow = true
             };
 #endif
+        }
+
+        internal static string BuildWindowsCommandScript(string command)
+        {
+            string script =
+                "@echo off\r\n" +
+                "cls\r\n";
+
+            if (NeedsGitLongPathsConfig(command))
+            {
+                script +=
+                    "git config --global core.longpaths true\r\n" +
+                    "if errorlevel 1 exit /b %errorlevel%\r\n";
+            }
+
+            return script + command + "\r\n";
+        }
+
+        internal static bool NeedsGitLongPathsConfig(string command)
+        {
+            return !string.IsNullOrEmpty(command)
+                   && command.IndexOf("git+", StringComparison.OrdinalIgnoreCase) >= 0;
         }
     }
 }
