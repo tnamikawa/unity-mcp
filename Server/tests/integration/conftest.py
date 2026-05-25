@@ -119,8 +119,25 @@ if _mcp_types is None:
 
     class _ToolAnnotations:
         def __init__(self, **kwargs):
+            self.title = None
+            self.readOnlyHint = None
+            self.destructiveHint = None
+            self.idempotentHint = None
+            self.openWorldHint = None
             for k, v in kwargs.items():
                 setattr(self, k, v)
+
+        def model_copy(self, update=None):
+            values = {
+                "title": self.title,
+                "readOnlyHint": self.readOnlyHint,
+                "destructiveHint": self.destructiveHint,
+                "idempotentHint": self.idempotentHint,
+                "openWorldHint": self.openWorldHint,
+            }
+            if update:
+                values.update(update)
+            return _ToolAnnotations(**values)
 
     _mcp_types.TextContent = _TextContent
     _mcp_types.ImageContent = _ImageContent
