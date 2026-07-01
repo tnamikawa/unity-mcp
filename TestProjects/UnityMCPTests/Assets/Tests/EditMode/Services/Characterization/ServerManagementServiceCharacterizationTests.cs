@@ -28,7 +28,9 @@ namespace MCPForUnityTests.Editor.Services.Characterization
         private string _savedHttpTransportScope;
         private bool _savedAllowLanHttpBind;
         private bool _savedAllowInsecureRemoteHttp;
+        private string _portFileOverrideDir;
         private string _portFileOverride;
+        private string _legacyPortFileOverride;
         private bool _savedLaunchConfirmed;
 
         [SetUp]
@@ -43,7 +45,10 @@ namespace MCPForUnityTests.Editor.Services.Characterization
             _savedAllowLanHttpBind = EditorPrefs.GetBool(EditorPrefKeys.AllowLanHttpBind, false);
             _savedAllowInsecureRemoteHttp = EditorPrefs.GetBool(EditorPrefKeys.AllowInsecureRemoteHttp, false);
 
-            _portFileOverride = Path.Combine(Path.GetTempPath(), "UnityMCPTests-port-" + Guid.NewGuid().ToString("N"));
+            _portFileOverrideDir = Path.Combine(Path.GetTempPath(), "UnityMCPTests-port-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(_portFileOverrideDir);
+            _portFileOverride = Path.Combine(_portFileOverrideDir, ".unity-mcp-port");
+            _legacyPortFileOverride = Path.Combine(_portFileOverrideDir, "unity-mcp-port");
             HttpEndpointUtility.SetPortFilePathOverrideForTesting(_portFileOverride);
         }
 
@@ -74,6 +79,8 @@ namespace MCPForUnityTests.Editor.Services.Characterization
 
             HttpEndpointUtility.SetPortFilePathOverrideForTesting(null);
             try { if (!string.IsNullOrEmpty(_portFileOverride) && File.Exists(_portFileOverride)) File.Delete(_portFileOverride); } catch { }
+            try { if (!string.IsNullOrEmpty(_legacyPortFileOverride) && File.Exists(_legacyPortFileOverride)) File.Delete(_legacyPortFileOverride); } catch { }
+            try { if (!string.IsNullOrEmpty(_portFileOverrideDir) && Directory.Exists(_portFileOverrideDir)) Directory.Delete(_portFileOverrideDir, true); } catch { }
 
             // Refresh cache to reflect restored values
             EditorConfigurationCache.Instance.Refresh();
@@ -298,6 +305,50 @@ namespace MCPForUnityTests.Editor.Services.Characterization
         #endregion
 
         #region HttpEndpointUtility Security Policy Tests
+
+        [Test]
+        public void GetLocalBaseUrl_PortFilePlainPort_UsesConfiguredPort()
+        {
+            File.WriteAllText(_portFileOverride, "59995\n");
+
+            string url = HttpEndpointUtility.GetLocalBaseUrl();
+
+            Assert.AreEqual("http://127.0.0.1:59995", url);
+        }
+
+        [Test]
+        public void GetLocalBaseUrl_PortFileUrl_UsesConfiguredPort()
+        {
+            File.WriteAllText(_portFileOverride, "http://localhost:59994/mcp\n");
+
+            string url = HttpEndpointUtility.GetLocalBaseUrl();
+
+            Assert.AreEqual("http://127.0.0.1:59994", url);
+        }
+
+        [Test]
+        public void GetLocalBaseUrl_LegacyPortFile_UsesConfiguredPortWhenPrimaryMissing()
+        {
+            if (File.Exists(_portFileOverride))
+            {
+                File.Delete(_portFileOverride);
+            }
+            File.WriteAllText(_legacyPortFileOverride, "59993\n");
+
+            string url = HttpEndpointUtility.GetLocalBaseUrl();
+
+            Assert.AreEqual("http://127.0.0.1:59993", url);
+        }
+
+        [Test]
+        public void GetLocalBaseUrl_PortFileUrlWithoutPort_FallsBackToDefaultPort()
+        {
+            File.WriteAllText(_portFileOverride, "http://localhost/mcp\n");
+
+            string url = HttpEndpointUtility.GetLocalBaseUrl();
+
+            Assert.AreEqual("http://127.0.0.1:8080", url);
+        }
 
         [Test]
         public void SaveRemoteBaseUrl_WithoutScheme_DefaultsToHttps()

@@ -30,6 +30,7 @@ namespace MCPForUnity.Editor.Helpers
         // clients without Happy Eyeballs (Codex/reqwest on Windows) avoid the IPv6 path
         // returned first by getaddrinfo for "localhost" while the server binds v4-only.
         private const string PortFileName = ".unity-mcp-port";
+        private const string LegacyPortFileName = "unity-mcp-port";
         private const string LocalHost = "127.0.0.1";
         private const int DefaultLocalPort = 8080;
         private static string _portFilePathOverride;
@@ -53,28 +54,83 @@ namespace MCPForUnity.Editor.Helpers
             return Path.Combine(projectRoot, PortFileName);
         }
 
+        private static string GetLegacyPortFilePath()
+        {
+            string primaryPath = GetPortFilePath();
+            string dir = Path.GetDirectoryName(primaryPath);
+            return string.IsNullOrEmpty(dir)
+                ? LegacyPortFileName
+                : Path.Combine(dir, LegacyPortFileName);
+        }
+
         private static int LoadLocalPort()
         {
-            try
+            string[] paths = { GetPortFilePath(), GetLegacyPortFilePath() };
+            foreach (string path in paths)
             {
-                string path = GetPortFilePath();
-                if (!File.Exists(path))
+                try
                 {
-                    return DefaultLocalPort;
+                    if (string.IsNullOrEmpty(path) || !File.Exists(path))
+                    {
+                        continue;
+                    }
+
+                    string text = File.ReadAllText(path).Trim();
+                    if (TryParseLocalPortValue(text, out int port))
+                    {
+                        return port;
+                    }
+
+                    McpLog.Warn($"Ignoring invalid HTTP local port file '{path}': {text}");
                 }
-                string text = File.ReadAllText(path).Trim();
-                if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int port)
-                    && port > 0
-                    && port <= 65535)
+                catch (Exception ex)
                 {
-                    return port;
+                    McpLog.Warn($"Failed to read port file '{path}': {ex.Message}");
                 }
             }
-            catch (Exception ex)
-            {
-                McpLog.Warn($"Failed to read port file: {ex.Message}");
-            }
+
             return DefaultLocalPort;
+        }
+
+        private static bool TryParseLocalPortValue(string value, out int port)
+        {
+            port = 0;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            string text = value.Trim();
+            if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out port)
+                && port > 0
+                && port <= 65535)
+            {
+                return true;
+            }
+
+            string normalized = NormalizeBaseUrl(text, $"http://{LocalHost}:{DefaultLocalPort}", remoteScope: false);
+            if (Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
+                && HasExplicitPort(uri)
+                && uri.Port > 0
+                && uri.Port <= 65535)
+            {
+                port = uri.Port;
+                return true;
+            }
+
+            port = 0;
+            return false;
+        }
+
+        private static bool HasExplicitPort(Uri uri)
+        {
+            if (uri == null || uri.Port <= 0)
+            {
+                return false;
+            }
+
+            string suffix = ":" + uri.Port.ToString(CultureInfo.InvariantCulture);
+            return uri.Authority.EndsWith(suffix, StringComparison.Ordinal);
         }
 
         private static void SaveLocalPort(int port)
@@ -102,12 +158,9 @@ namespace MCPForUnity.Editor.Helpers
             {
                 return DefaultLocalPort;
             }
-            string normalized = NormalizeBaseUrl(userValue, $"http://{LocalHost}:{DefaultLocalPort}", remoteScope: false);
-            if (Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
-                && uri.Port > 0
-                && uri.Port <= 65535)
+            if (TryParseLocalPortValue(userValue, out int port))
             {
-                return uri.Port;
+                return port;
             }
             return DefaultLocalPort;
         }
