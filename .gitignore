@@ -70,3 +70,7 @@ tools/.unity-check-logs/
 /.claude
 .mcp.json
 /tmp
+
+# Superpowers skill working artifacts (specs, plans, SDD ledger)
+docs/superpowers/
+.superpowers/
