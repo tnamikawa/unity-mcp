@@ -464,7 +464,7 @@ namespace MCPForUnity.Editor.Services
                     {
                         IsPlaying = EditorApplication.isPlaying,
                         IsPaused = EditorApplication.isPaused,
-                        IsChanging = EditorApplication.isPlayingOrWillChangePlaymode
+                        IsChanging = EditorExecutionGuard.IsChangingPlayMode
                     },
                     ActiveScene = new EditorStateActiveScene
                     {
@@ -546,6 +546,21 @@ namespace MCPForUnity.Editor.Services
                 // The main GC optimization comes from state-change detection (OnUpdate)
                 // which prevents unnecessary _cached rebuilds, not from caching the clone.
                 var clone = (JObject)_cached.DeepClone();
+
+                // These are execution gates, not advisory cached values. Include requests
+                // made since the last snapshot, including the pre-compilation window.
+                if (clone["compilation"] is JObject compilation)
+                {
+                    compilation["is_compile_pending"] = EditorExecutionGuard.CompilationPending;
+                    compilation["has_compile_errors"] = EditorExecutionGuard.CompilationFailed;
+                }
+                if (clone["editor"]?["play_mode"] is JObject playMode)
+                    playMode["is_changing"] = EditorExecutionGuard.IsChangingPlayMode;
+                var active = EditorExecutionGuard.GetActiveExecutionError();
+                clone["execution"] = active == null
+                    ? new JObject { ["is_running"] = false }
+                    : JObject.FromObject(active.Data);
+                clone["execution"]["is_running"] = active != null;
 
                 // When Unity is backgrounded, OnUpdate is throttled and the
                 // cached timestamp grows stale even though the data is current.

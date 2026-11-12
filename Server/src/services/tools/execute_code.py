@@ -94,8 +94,15 @@ async def execute_code(
     if not isinstance(response, dict):
         return {"success": False, "message": str(response)}
 
-    return {
-        "success": response.get("success", False),
-        "message": response.get("message", response.get("error", "")),
-        "data": response.get("data"),
-    }
+    # A normalized transport error includes message=None. dict.get's default does
+    # not apply to that value; preserve both the actual error and readiness details.
+    result = dict(response)
+    result["success"] = response.get("success", False)
+    result["message"] = response.get("message") or response.get("error") or ""
+    result["data"] = response.get("data")
+    if result["message"] == "TimeoutError":
+        result["message"] = (
+            "Unity response timed out; the C# code may still be running. "
+            "Check editor readiness before retrying."
+        )
+    return result

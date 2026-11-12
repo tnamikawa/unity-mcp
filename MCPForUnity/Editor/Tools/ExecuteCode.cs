@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using MCPForUnity.Editor.Helpers;
+using MCPForUnity.Editor.Services;
 using MCPForUnity.Runtime.Helpers;
 using Microsoft.CSharp;
 using Newtonsoft.Json.Linq;
@@ -124,6 +125,9 @@ namespace MCPForUnity.Editor.Tools
                     return new ErrorResponse($"Blocked pattern detected: {violation}");
             }
 
+            if (!EditorExecutionGuard.TryBegin(out var execution, out var busy))
+                return busy;
+
             try
             {
                 var startTime = DateTime.UtcNow;
@@ -139,6 +143,10 @@ namespace MCPForUnity.Editor.Tools
                 var errorResult = new ErrorResponse($"Execution failed: {e.Message}");
                 AddToHistory(code, errorResult, 0, safetyChecks, compiler);
                 return errorResult;
+            }
+            finally
+            {
+                execution.Dispose();
             }
         }
 
@@ -259,6 +267,9 @@ namespace MCPForUnity.Editor.Tools
 
         private static object InvokeCompiled(Assembly assembly, string compilerUsed)
         {
+            var busy = EditorExecutionGuard.CheckReadiness();
+            if (busy != null) return busy;
+
             var type = assembly.GetType(WrapperClassName);
             if (type == null)
                 return new ErrorResponse("Internal error: failed to find compiled type.");

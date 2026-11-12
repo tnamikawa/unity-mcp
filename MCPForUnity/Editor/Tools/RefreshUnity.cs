@@ -72,7 +72,7 @@ namespace MCPForUnity.Editor.Tools
 
                 if (string.Equals(compile, "request", StringComparison.OrdinalIgnoreCase))
                 {
-                    CompilationPipeline.RequestScriptCompilation();
+                    EditorExecutionGuard.RequestScriptCompilation();
                     compileRequested = true;
                 }
 
@@ -153,6 +153,7 @@ namespace MCPForUnity.Editor.Tools
 
             string resultingState = EditorStateCache.GetActualIsCompiling()
                 ? "compiling"
+                : EditorExecutionGuard.CompilationPending ? "compilation_pending"
                 : (EditorApplication.isUpdating ? "asset_import" : "idle");
 
             return new SuccessResponse("Refresh requested.", new
@@ -275,8 +276,7 @@ namespace MCPForUnity.Editor.Tools
                         return;
                     }
 
-                    if (!EditorStateCache.GetActualIsCompiling()
-                        && !EditorApplication.isUpdating
+                    if (EditorExecutionGuard.CheckReadiness() == null
                         && !TestRunStatus.IsRunning
                         && !EditorApplication.isPlayingOrWillChangePlaymode)
                     {

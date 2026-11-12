@@ -1,8 +1,35 @@
 import pytest
 
+from services.resources.editor_state import EditorStateData, _enrich_advice_and_staleness
+
 from services.registry import get_registered_resources
 
 from .test_helpers import DummyContext
+
+
+@pytest.mark.parametrize("section,details,reason", [
+    ("compilation", {"is_compile_pending": True}, "compilation_pending"),
+    ("compilation", {"has_compile_errors": True}, "compilation_failed"),
+    ("assets", {"is_updating": True}, "asset_refresh"),
+    ("editor", {"play_mode": {"is_changing": True}}, "playmode_transition"),
+    ("execution", {"is_running": True, "execution_id": "running-1"}, "execution_in_progress"),
+])
+def test_execution_gate_states_survive_model_and_block_readiness(monkeypatch, section, details, reason):
+    monkeypatch.setattr("services.resources.editor_state._now_unix_ms", lambda: 1000)
+    state = EditorStateData(
+        schema_version="unity-mcp/editor_state@2", observed_at_unix_ms=1000,
+        sequence=1, **{section: details},
+    ).model_dump()
+    enriched = _enrich_advice_and_staleness(state)
+    assert enriched["advice"]["ready_for_tools"] is False
+    assert reason in enriched["advice"]["blocking_reasons"]
+
+
+def test_stable_play_mode_is_not_a_transition(monkeypatch):
+    monkeypatch.setattr("services.resources.editor_state._now_unix_ms", lambda: 1000)
+    state = {"observed_at_unix_ms": 1000,
+             "editor": {"play_mode": {"is_playing": True, "is_changing": False}}}
+    assert _enrich_advice_and_staleness(state)["advice"]["ready_for_tools"] is True
 
 
 @pytest.mark.asyncio

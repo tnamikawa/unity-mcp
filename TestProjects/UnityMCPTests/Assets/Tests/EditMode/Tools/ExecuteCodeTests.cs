@@ -3,10 +3,14 @@ using System.CodeDom.Compiler;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.CSharp;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using MCPForUnity.Editor.Tools;
+using MCPForUnity.Editor.Services;
+using MCPForUnity.Editor.Services.Transport;
 using static MCPForUnityTests.Editor.TestUtilities;
 
 namespace MCPForUnityTests.Editor.Tools
@@ -20,6 +24,57 @@ namespace MCPForUnityTests.Editor.Tools
         }
 
         // ──────────────────── Execute: success cases ────────────────────
+
+        [TestCase("execute")]
+        [TestCase("replay")]
+        public void ExecutionOnWorkerThreadIsRejected(string action)
+        {
+            if (action == "replay") Execute("return 42;");
+            var result = Task.Run(() => ToJObject(ExecuteCode.HandleCommand(new JObject
+            {
+                ["action"] = action, ["code"] = "return 42;", ["index"] = 0,
+                ["safety_checks"] = false
+            }))).GetAwaiter().GetResult();
+            Assert.IsFalse(result.Value<bool>("success"), result.ToString());
+            Assert.AreEqual("not_main_thread", result["data"]?["reason"]?.ToString(), result.ToString());
+        }
+
+        [Test]
+        public void RunningCodeRejectsTransportRetryWithoutWaitingForEditorPump()
+        {
+            Assert.IsTrue(EditorExecutionGuard.TryBegin(out var execution, out var busy), busy?.Error);
+            using (execution)
+            {
+                var request = new JObject
+                {
+                    ["type"] = "execute_code",
+                    ["params"] = new JObject { ["action"] = "execute", ["code"] = "return 42;" }
+                };
+                var response = Task.Run(() => TransportCommandDispatcher.ExecuteCommandJsonAsync(
+                    request.ToString(), CancellationToken.None));
+                Assert.IsTrue(response.Wait(TimeSpan.FromSeconds(2)), "Busy requests must not await the blocked Editor thread");
+                var result = JObject.Parse(response.Result)["result"];
+                Assert.IsFalse(result.Value<bool>("success"));
+                Assert.AreEqual("execution_in_progress", result["data"]?["reason"]?.ToString());
+                Assert.AreEqual(execution.Id, result["data"]?["execution_id"]?.ToString());
+                Assert.IsFalse(result["data"].Value<bool>("execution_stopped"));
+            }
+        }
+
+        [Test]
+        public void SafetyChecksFalseDoesNotBypassRunningExecution()
+        {
+            Assert.IsTrue(EditorExecutionGuard.TryBegin(out var execution, out var busy), busy?.Error);
+            using (execution)
+            {
+                var result = ToJObject(ExecuteCode.HandleCommand(new JObject
+                {
+                    ["action"] = "execute", ["code"] = "return 42;", ["safety_checks"] = false
+                }));
+                Assert.IsFalse(result.Value<bool>("success"), result.ToString());
+                Assert.AreEqual("execution_in_progress", result["data"]?["reason"]?.ToString());
+            }
+        }
 
         [Test]
         public void Execute_ReturnString_ReturnsSuccess()

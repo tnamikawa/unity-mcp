@@ -126,6 +126,26 @@ def test_error_response_normalized(mock_unity_error):
     assert "Compilation failed" in result["message"]
 
 
+@pytest.mark.parametrize("error", ["Command timed out after 30 seconds", "editor_busy", "TimeoutError"])
+def test_null_message_preserves_error_and_execution_details(monkeypatch, error):
+    response = {
+        "success": False, "message": None, "error": error, "hint": "retry",
+        "data": {"reason": "execution_in_progress", "execution_stopped": False},
+    }
+    monkeypatch.setattr("services.tools.execute_code.get_unity_instance_from_context",
+                        AsyncMock(return_value="unity-instance-1"))
+    monkeypatch.setattr("services.tools.execute_code.send_with_unity_instance",
+                        AsyncMock(return_value=response))
+    result = asyncio.run(execute_code(SimpleNamespace(), action="execute", code="return 1;"))
+    assert result["success"] is False
+    assert result["error"] == error
+    assert result["message"]
+    assert result["hint"] == "retry"
+    assert result["data"] == response["data"]
+    if error == "TimeoutError":
+        assert "may still be running" in result["message"]
+
+
 def test_non_dict_response_handled(monkeypatch):
     async def fake_send(send_fn, unity_instance, tool_name, params):
         return "unexpected"

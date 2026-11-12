@@ -49,6 +49,8 @@ class EditorStateActivity(BaseModel):
 
 class EditorStateCompilation(BaseModel):
     is_compiling: bool | None = None
+    is_compile_pending: bool | None = None
+    has_compile_errors: bool | None = None
     is_domain_reload_pending: bool | None = None
     last_compile_started_unix_ms: int | None = None
     last_compile_finished_unix_ms: int | None = None
@@ -95,6 +97,12 @@ class EditorStateSettings(BaseModel):
     batch_execute_max_commands: int | None = None
 
 
+class EditorStateExecution(BaseModel):
+    is_running: bool | None = None
+    execution_id: str | None = None
+    started_at_unix_ms: int | None = None
+
+
 class EditorStateAdvice(BaseModel):
     ready_for_tools: bool | None = None
     blocking_reasons: list[str] | None = None
@@ -115,6 +123,7 @@ class EditorStateData(BaseModel):
     editor: EditorStateEditor | None = None
     activity: EditorStateActivity | None = None
     compilation: EditorStateCompilation | None = None
+    execution: EditorStateExecution | None = None
     assets: EditorStateAssets | None = None
     tests: EditorStateTests | None = None
     transport: EditorStateTransport | None = None
@@ -195,12 +204,20 @@ def _enrich_advice_and_staleness(state_v2: dict[str, Any]) -> dict[str, Any]:
     blocking: list[str] = []
     if compilation.get("is_compiling") is True:
         blocking.append("compiling")
+    if compilation.get("is_compile_pending") is True:
+        blocking.append("compilation_pending")
+    if compilation.get("has_compile_errors") is True:
+        blocking.append("compilation_failed")
     if compilation.get("is_domain_reload_pending") is True:
         blocking.append("domain_reload")
     if tests.get("is_running") is True:
         blocking.append("running_tests")
-    if refresh.get("is_refresh_in_progress") is True:
+    if refresh.get("is_refresh_in_progress") is True or assets.get("is_updating") is True:
         blocking.append("asset_refresh")
+    if ((state_v2.get("editor") or {}).get("play_mode") or {}).get("is_changing") is True:
+        blocking.append("playmode_transition")
+    if (state_v2.get("execution") or {}).get("is_running") is True:
+        blocking.append("execution_in_progress")
     if is_stale:
         blocking.append("stale_status")
 

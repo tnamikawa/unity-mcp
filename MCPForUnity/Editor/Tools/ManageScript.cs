@@ -8,6 +8,7 @@ using UnityEditor;
 using UnityEngine;
 using MCPForUnity.Editor.Constants;
 using MCPForUnity.Editor.Helpers;
+using MCPForUnity.Editor.Services;
 using System.Threading;
 using System.Security.Cryptography;
 
@@ -780,7 +781,7 @@ namespace MCPForUnity.Editor.Tools
                         ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate
                     );
 #if UNITY_EDITOR
-                    UnityEditor.Compilation.CompilationPipeline.RequestScriptCompilation();
+                    EditorExecutionGuard.RequestScriptCompilation();
 #endif
                 }
                 else
@@ -2981,7 +2982,7 @@ namespace MCPForUnity.Editor.Tools
                     AssetDatabase.ImportAsset(sp, ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
                 }
 #if UNITY_EDITOR
-                UnityEditor.Compilation.CompilationPipeline.RequestScriptCompilation();
+                EditorExecutionGuard.RequestScriptCompilation();
 #endif
                 // Fallback if needed:
                 // AssetDatabase.Refresh();
@@ -3017,7 +3018,7 @@ namespace MCPForUnity.Editor.Tools
             if (synchronous) opts |= ImportAssetOptions.ForceSynchronousImport;
             AssetDatabase.ImportAsset(sp, opts);
 #if UNITY_EDITOR
-            UnityEditor.Compilation.CompilationPipeline.RequestScriptCompilation();
+            EditorExecutionGuard.RequestScriptCompilation();
 #endif
         }
     }

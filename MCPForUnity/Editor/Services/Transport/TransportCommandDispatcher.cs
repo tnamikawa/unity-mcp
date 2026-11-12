@@ -96,6 +96,12 @@ namespace MCPForUnity.Editor.Services.Transport
 
             EnsureInitialised();
 
+            // Reject retries while synchronous user code still owns the Editor, even if its
+            // original response timed out. Do not queue them to run later without the caller.
+            var busy = EditorExecutionGuard.GetActiveExecutionError();
+            if (busy != null)
+                return Task.FromResult(JsonConvert.SerializeObject(new { status = "success", result = busy }));
+
             var id = Guid.NewGuid().ToString("N");
             var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 

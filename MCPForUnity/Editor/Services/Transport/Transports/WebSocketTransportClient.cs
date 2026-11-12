@@ -628,7 +628,8 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                 responseJson = JsonConvert.SerializeObject(new
                 {
                     status = "error",
-                    error = $"Command '{commandName}' timed out after {timeoutSeconds} seconds"
+                    error = $"Command '{commandName}' timed out after {timeoutSeconds} seconds. "
+                        + "Only the response wait was cancelled; Unity code may still be running. Check readiness before retrying."
                 });
             }
             catch (Exception ex)
