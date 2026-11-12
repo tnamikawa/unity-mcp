@@ -13,6 +13,7 @@ import struct
 import threading
 import time
 from typing import Any
+from transport.execution_policy import is_read_only, prepare_execution, uncertain_response
 
 from models.models import MCPResponse, UnityInstanceInfo
 from transport.legacy.stdio_port_registry import stdio_port_registry
@@ -287,6 +288,9 @@ class UnityConnection:
             raise ValueError("MCP call missing command_type")
         if params is None:
             return MCPResponse(success=False, error="MCP call received with no parameters (client placeholder?)")
+        params = prepare_execution(command_type, params)
+        if not is_read_only(command_type, params):
+            max_attempts = 0
         attempts = max(config.max_retries,
                        5) if max_attempts is None else max_attempts
         base_backoff = max(0.5, config.retry_delay)
@@ -838,6 +842,10 @@ def send_command_with_retry(
     structured failure if retries are exhausted.
     """
     t_retry_start = time.time()
+    params = prepare_execution(command_type, params)
+    mutation = not is_read_only(command_type, params)
+    if mutation:
+        retry_on_reload = False
     logger.info("[TIMING-STDIO] send_command_with_retry START command=%s", command_type)
     t_get_conn = time.time()
     conn = get_unity_connection(instance_id)
@@ -875,8 +883,24 @@ def send_command_with_retry(
     # Commands that trigger compilation/reload shouldn't retry on disconnect
     send_max_attempts = None if retry_on_reload else 0
 
-    response = conn.send_command(
-        command_type, params, max_attempts=send_max_attempts, deadline=deadline)
+    try:
+        response = conn.send_command(
+            command_type, params, max_attempts=send_max_attempts, deadline=deadline)
+    except Exception as exc:
+        if mutation:
+            return uncertain_response(command_type, params, str(exc) or type(exc).__name__)
+        raise
+    if mutation:
+        if isinstance(response, dict) and response.get("hint") == "retry":
+            response = dict(response, hint="inspect_execution", execution_id=params["execution_id"])
+            for field in ("message", "error"):
+                if isinstance(response.get(field), str):
+                    response[field] = response[field].replace("; please retry", "")
+        elif isinstance(response, MCPResponse) and response.hint == "retry":
+            response = response.model_copy(update={"hint": "inspect_execution",
+                "error": response.error.replace("; please retry", "") if response.error else response.error,
+                "message": response.message.replace("; please retry", "") if response.message else response.message})
+        return response
     retries = 0
     wait_started = None
     reason = _extract_response_reason(response)

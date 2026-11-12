@@ -634,72 +634,15 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                                 }
                             }
                             catch { }
-                            string commandId = Guid.NewGuid().ToString();
-                            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-                            if (commandText.Trim() == "ping")
-                            {
-                                byte[] pingResponseBytes = System.Text.Encoding.UTF8.GetBytes(
-                                    "{\"status\":\"success\",\"result\":{\"message\":\"pong\"}}"
-                                );
-                                await WriteFrameAsync(stream, pingResponseBytes);
-                                continue;
-                            }
-
-                            // A command already in flight from a different connection means the
-                            // broker gave up waiting, reconnected and resent it. Running it a
-                            // second time would duplicate side effects (issue #1130), so attach
-                            // to the original instead of queueing a copy.
-                            TaskCompletionSource<string> pending = tcs;
-                            lock (lockObj)
-                            {
-                                QueuedCommand inFlight = FindBrokerResendTarget(commandText, client);
-                                if (inFlight != null)
-                                {
-                                    pending = inFlight.Tcs;
-                                    McpLog.Warn("Suppressed duplicate command resent on a new connection; "
-                                                + "awaiting the in-flight result instead of running it twice.");
-                                }
-                                else
-                                {
-                                    commandQueue[commandId] = new QueuedCommand
-                                    {
-                                        CommandJson = commandText,
-                                        Tcs = tcs,
-                                        IsExecuting = false,
-                                        EnqueuedAtMs = _uptime.ElapsedMilliseconds,
-                                        Owner = client
-                                    };
-                                }
-                            }
-
-                            // Force Unity's main loop to iterate even when backgrounded,
-                            // so ProcessCommands fires and picks up the queued command.
-                            // This mirrors what HTTP does via TransportCommandDispatcher.RequestMainThreadPump().
-                            try { EditorApplication.QueuePlayerLoopUpdate(); } catch { }
-
                             string response;
                             try
                             {
-                                using var respCts = new CancellationTokenSource(FrameIOTimeoutMs);
-                                var completed = await Task.WhenAny(pending.Task, Task.Delay(FrameIOTimeoutMs, respCts.Token)).ConfigureAwait(false);
-                                if (completed == pending.Task)
-                                {
-                                    respCts.Cancel();
-                                    response = pending.Task.Result;
-                                    Interlocked.Exchange(ref _consecutiveTimeouts, 0);
-                                }
-                                else
-                                {
-                                    int timeouts = Interlocked.Increment(ref _consecutiveTimeouts);
-                                    McpLog.Warn($"Command TCS timed out ({timeouts} consecutive)");
-                                    var timeoutResponse = new
-                                    {
-                                        status = "error",
-                                        error = $"Command processing timed out after {FrameIOTimeoutMs} ms",
-                                    };
-                                    response = JsonConvert.SerializeObject(timeoutResponse);
-                                }
+                                // Admit on the transport thread, including main-thread ping and status.
+                                // All clients share the dispatcher's durable execution ledger.
+                                using var respCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                                string commandType = commandText.Trim() == "ping" ? "ping" : JObject.Parse(commandText).Value<string>("type");
+                                respCts.CancelAfter(commandType == "ping" || commandType == "get_editor_state" ? 2000 : FrameIOTimeoutMs);
+                                response = await TransportCommandDispatcher.ExecuteCommandJsonAsync(commandText, respCts.Token).ConfigureAwait(false);
                             }
                             catch (Exception ex)
                             {

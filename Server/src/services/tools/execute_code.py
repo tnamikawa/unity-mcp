@@ -24,7 +24,9 @@ from transport.legacy.unity_connection import async_send_command_with_retry
         "The code runs as a method body with access to UnityEngine and UnityEditor namespaces. "
         "Use 'return' to send data back. Compiled in-memory — no script files created. "
         "Actions: execute (run code), get_history (list past executions), "
-        "replay (re-run a history entry), clear_history. "
+        "replay (re-run a history entry), clear_history, get_execution_status. "
+        "Use a stable execution_id for each intended execution. Reusing it returns the existing result. "
+        "After a timeout/disconnect query get_execution_status; do not resubmit the operation. "
         "NOTE: safety_checks blocks known dangerous patterns but is not a full sandbox. "
         "Compiler options: 'auto' (Roslyn if available, else CodeDom), 'roslyn' (C# 12+, requires Microsoft.CodeAnalysis), 'codedom' (C# 6 only)."
     ),
@@ -37,7 +39,7 @@ from transport.legacy.unity_connection import async_send_command_with_retry
 async def execute_code(
     ctx: Context,
     action: Annotated[
-        Literal["execute", "get_history", "replay", "clear_history"],
+        Literal["execute", "get_history", "replay", "clear_history", "get_execution_status"],
         "Action to perform.",
     ],
     code: Annotated[
@@ -64,10 +66,18 @@ async def execute_code(
         "'auto' uses Roslyn if Microsoft.CodeAnalysis is installed, else falls back to CodeDom. "
         "'roslyn' forces Roslyn (C# 12+). 'codedom' forces legacy CSharpCodeProvider (C# 6). Default: auto.",
     ] = "auto",
+    execution_id: Annotated[
+        str | None,
+        "Stable ID for execute/replay; for get_execution_status, omit to list recent executions and the Editor block state.",
+    ] = None,
 ) -> dict[str, Any]:
     unity_instance = await get_unity_instance_from_context(ctx)
 
     params_dict: dict[str, Any] = {"action": action}
+    if execution_id is not None:
+        if not execution_id.strip() or len(execution_id) > 128:
+            return {"success": False, "error": "invalid_execution_id", "message": "Use 1 to 128 characters."}
+        params_dict["execution_id"] = execution_id
 
     if action == "execute":
         if code is None:
@@ -103,6 +113,6 @@ async def execute_code(
     if result["message"] == "TimeoutError":
         result["message"] = (
             "Unity response timed out; the C# code may still be running. "
-            "Check editor readiness before retrying."
+            "Query get_execution_status with the original execution ID."
         )
     return result

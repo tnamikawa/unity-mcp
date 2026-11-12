@@ -479,7 +479,9 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                     await HandleRegisteredAsync(payload, token).ConfigureAwait(false);
                     break;
                 case "execute":
-                    await HandleExecuteAsync(payload, token).ConfigureAwait(false);
+                    // Keep receiving status queries and competing requests while a handler waits.
+                    // The shared dispatcher owns mutation admission; SendJsonAsync serializes replies.
+                    _ = HandleExecuteSafelyAsync(payload, token);
                     break;
                 case "ping":
                     await SendPongAsync(token).ConfigureAwait(false);
@@ -597,6 +599,21 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
             }
         }
 
+        private async Task HandleExecuteSafelyAsync(JObject payload, CancellationToken token)
+        {
+            try
+            {
+                await HandleExecuteAsync(payload, token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                if (token.IsCancellationRequested) return;
+                McpLog.Warn($"[WebSocket] Command response failed: {ex.Message}");
+                await HandleSocketClosureAsync(ex.Message).ConfigureAwait(false);
+            }
+        }
+
         private async Task HandleExecuteAsync(JObject payload, CancellationToken token)
         {
             string commandId = payload.Value<string>("id");
@@ -629,7 +646,7 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                 {
                     status = "error",
                     error = $"Command '{commandName}' timed out after {timeoutSeconds} seconds. "
-                        + "Only the response wait was cancelled; Unity code may still be running. Check readiness before retrying."
+                        + "The execution result is unknown. Query execute_code.get_execution_status before further changes."
                 });
             }
             catch (Exception ex)

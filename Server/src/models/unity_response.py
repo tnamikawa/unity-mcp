@@ -45,6 +45,10 @@ def normalize_unity_response(response: Any) -> Any:
 
     if not success and not normalized["error"]:
         normalized["error"] = message or "Unity command failed"
+    if "execution" in response:
+        normalized["execution"] = response["execution"]
+    elif "execution" in payload:
+        normalized["execution"] = payload["execution"]
 
     return normalized
 

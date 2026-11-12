@@ -18,6 +18,7 @@ from core.constants import API_KEY_HEADER
 from models.models import MCPResponse
 from transport.plugin_registry import PluginRegistry
 from transport.blender_timeout import blender_command_timeout, SERVER_RESPONSE_GRACE
+from transport.execution_policy import is_read_only, prepare_execution, uncertain_response
 from services.api_key_service import ApiKeyService
 
 if TYPE_CHECKING:
@@ -285,6 +286,7 @@ class PluginHub(WebSocketEndpoint):
     # ------------------------------------------------------------------
     @classmethod
     async def send_command(cls, session_id: str, command_type: str, params: dict[str, Any]) -> dict[str, Any]:
+        params = prepare_execution(command_type, params)
         websocket = await cls._get_connection(session_id)
         command_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -345,6 +347,9 @@ class PluginHub(WebSocketEndpoint):
             try:
                 await websocket.send_json(msg.model_dump())
             except Exception as exc:
+                if not is_read_only(command_type, params):
+                    future.cancel()
+                    return uncertain_response(command_type, params, str(exc) or type(exc).__name__)
                 # If send fails (socket already closing), fail the future so callers don't hang.
                 if not future.done():
                     future.set_exception(exc)
@@ -353,8 +358,12 @@ class PluginHub(WebSocketEndpoint):
                 result = await asyncio.wait_for(future, timeout=server_wait_s)
                 return result
             except PluginDisconnectedError as exc:
+                if not is_read_only(command_type, params):
+                    return uncertain_response(command_type, params, str(exc))
                 return MCPResponse(success=False, error=str(exc), hint="retry").model_dump()
             except asyncio.TimeoutError:
+                if not is_read_only(command_type, params):
+                    return uncertain_response(command_type, params, "Unity response timed out. Inspect the existing execution ID.")
                 if command_type in cls._FAST_FAIL_COMMANDS:
                     return MCPResponse(
                         success=False,
@@ -1011,6 +1020,19 @@ class PluginHub(WebSocketEndpoint):
             user_id: User ID for session isolation in remote-hosted mode
             retry_on_reload: If False, do not wait for session reconnect on reload.
         """
+        params = prepare_execution(command_type, params)
+        mutation = not is_read_only(command_type, params)
+        if mutation:
+            retry_on_reload = False
+
+        def unavailable(reason):
+            result = cls._unavailable_retry_response(reason)
+            if mutation:
+                result["hint"] = "inspect_execution"
+                result["error"] = "unity_session_unavailable"
+                result["message"] = "Unity connection is unavailable. Inspect the Editor connection and execution status."
+                result["data"] = {**(result.get("data") or {}), "execution_id": params["execution_id"], "state": "not_sent"}
+            return result
         try:
             session_id = await cls._resolve_session_id(
                 unity_instance,
@@ -1023,11 +1045,11 @@ class PluginHub(WebSocketEndpoint):
                 command_type,
                 unity_instance or "default",
             )
-            return cls._unavailable_retry_response("no_unity_session")
+            return unavailable("no_unity_session")
 
         if not await cls._ensure_live_connection(session_id):
             if not retry_on_reload:
-                return cls._unavailable_retry_response("stale_connection")
+                return unavailable("stale_connection")
             try:
                 session_id = await cls._resolve_session_id(
                     unity_instance,
@@ -1035,9 +1057,9 @@ class PluginHub(WebSocketEndpoint):
                     retry_on_reload=True,
                 )
             except NoUnitySessionError:
-                return cls._unavailable_retry_response("no_unity_session")
+                return unavailable("no_unity_session")
             if not await cls._ensure_live_connection(session_id):
-                return cls._unavailable_retry_response("stale_connection")
+                return unavailable("stale_connection")
 
         # During domain reload / immediate reconnect windows, the plugin may be connected but not yet
         # ready to process execute commands on the Unity main thread (which can be further delayed when
