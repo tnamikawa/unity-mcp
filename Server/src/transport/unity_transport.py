@@ -10,7 +10,7 @@ from core.constants import API_KEY_HEADER
 from services.api_key_service import ApiKeyService
 from models.models import MCPResponse
 from models.unity_response import normalize_unity_response
-from transport.execution_policy import is_read_only, prepare_execution, uncertain_response
+from transport.execution_policy import requires_code_execution, prepare_execution, uncertain_response
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -58,7 +58,7 @@ async def send_with_unity_instance(
             raise TypeError(
                 "Command parameters must be a dict for HTTP transport")
         params = prepare_execution(command_type, params)
-        mutation = not is_read_only(command_type, params)
+        code_execution = requires_code_execution(command_type, params)
 
         # Auto-resolve user_id from HTTP request API key (remote-hosted mode)
         if user_id is None:
@@ -77,7 +77,7 @@ async def send_with_unity_instance(
         retry_on_reload = kwargs.pop("retry_on_reload", True)
         if not isinstance(retry_on_reload, bool):
             retry_on_reload = True
-        if mutation:
+        if code_execution:
             retry_on_reload = False
 
         try:
@@ -89,7 +89,7 @@ async def send_with_unity_instance(
                 retry_on_reload=retry_on_reload,
             )
             result = normalize_unity_response(raw)
-            if mutation and isinstance(result, dict) and result.get("hint") == "retry":
+            if code_execution and isinstance(result, dict) and result.get("hint") == "retry":
                 result = dict(result, hint="inspect_execution")
                 result.setdefault("execution_id", params["execution_id"])
             return result
@@ -110,7 +110,7 @@ async def send_with_unity_instance(
         except Exception as exc:
             # NOTE: asyncio.TimeoutError has an empty str() by default, which is confusing for clients.
             err = str(exc) or f"{type(exc).__name__}"
-            if mutation:
+            if code_execution:
                 return uncertain_response(command_type, params, err)
             # Fail fast with a retry hint instead of hanging for COMMAND_TIMEOUT.
             # The client can decide whether retrying is appropriate for the command.

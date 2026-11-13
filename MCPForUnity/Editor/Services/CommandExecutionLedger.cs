@@ -38,14 +38,12 @@ namespace MCPForUnity.Editor.Services
         private string blockedReason;
         private string activeId;
         private string storageError;
-        private long lastHeartbeat;
 
         internal CommandExecutionLedger(string path, string owner, Func<long> clock = null)
         {
             this.path = path;
             this.owner = owner;
             this.clock = clock ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            lastHeartbeat = this.clock();
             try
             {
                 if (!File.Exists(path)) return;
@@ -53,12 +51,20 @@ namespace MCPForUnity.Editor.Services
                 if (saved == null || saved.Owner == null || saved.Entries == null)
                     throw new InvalidDataException("Invalid execution ledger");
                 bool restarted = saved.Owner != owner;
-                blockedReason = restarted ? null : saved.BlockedReason;
+                bool changed = restarted || saved.BlockedReason != null;
                 foreach (var entry in saved.Entries)
                 {
+                    // Migrate journals created by the former all-command policy. Legacy
+                    // wrappers have no saved arguments, so retain their execution identity.
+                    if (entry.Command != "execute_code" && entry.Command != "batch_execute" && entry.Command != "execute_custom_tool")
+                    {
+                        changed = true;
+                        continue;
+                    }
                     entries.Add(entry.Id, entry);
                     if (IsOutstanding(entry))
                     {
+                        changed = true;
                         entry.State = restarted ? "interrupted" : "unknown";
                         entry.Response = null;
                         if (!restarted)
@@ -68,27 +74,52 @@ namespace MCPForUnity.Editor.Services
                         }
                     }
                 }
-                Save();
+                if (changed) Save();
             }
             catch (Exception ex) { storageError = ex.Message; }
         }
 
-        internal static bool IsReadOnly(string command, JObject parameters)
+        internal static bool RequiresCodeExecution(string command, JObject parameters)
         {
-            string action = parameters?.Value<string>("action")?.ToLowerInvariant();
-            switch (command?.ToLowerInvariant())
+            var pending = new Stack<(string Tool, JObject Parameters)>();
+            pending.Push((command, parameters));
+            while (pending.Count > 0)
             {
-                case "ping": case "get_editor_state": case "get_test_job": return true;
-                case "read_console": return action == null || action == "get";
-                case "execute_code": return action == "get_history" || action == "get_execution_status";
-                default: return false; // Custom tools and batches also acquire the mutation lease.
+                var item = pending.Pop();
+                if (item.Parameters == null) continue;
+                if (item.Tool == "execute_code")
+                {
+                    var action = item.Parameters["action"];
+                    if (action?.Type == JTokenType.String &&
+                        (string.Equals((string)action, "execute", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals((string)action, "replay", StringComparison.OrdinalIgnoreCase))) return true;
+                }
+                else if (item.Tool == "batch_execute" && item.Parameters["commands"] is JArray commands)
+                {
+                    foreach (var child in commands.OfType<JObject>())
+                    {
+                        var normalized = new JObject();
+                        if (child["params"] is JObject raw)
+                            foreach (var property in raw.Properties())
+                            {
+                                var parts = property.Name.Split('_');
+                                string name = parts[0] + string.Concat(parts.Skip(1).Where(p => p.Length > 0)
+                                    .Select(p => char.ToUpperInvariant(p[0]) + p.Substring(1)));
+                                normalized[name] = property.Value.DeepClone();
+                            }
+                        pending.Push((child["tool"]?.ToString(), normalized));
+                    }
+                }
+                else if (item.Tool == "execute_custom_tool")
+                    pending.Push((item.Parameters["tool_name"]?.ToString(), item.Parameters["parameters"] as JObject));
             }
+            return false;
         }
-
-        internal void Heartbeat() { lock (sync) lastHeartbeat = clock(); }
 
         internal string Admit(string command, JObject parameters, out string id, bool compilationPending = false)
         {
+            id = null;
+            if (!RequiresCodeExecution(command, parameters)) return null;
             lock (sync)
             {
                 id = parameters?.Value<string>("execution_id") ?? Guid.NewGuid().ToString("N");
@@ -105,15 +136,9 @@ namespace MCPForUnity.Editor.Services
                 if (storageError != null)
                     return Error("execution_storage_error", "Execution journal unavailable: " + storageError);
                 if (blockedReason != null || activeId != null)
-                    return Error(blockedReason ?? "execution_in_progress", "Changes are blocked. Inspect the existing execution.", Active());
+                    return Error(blockedReason ?? "execution_in_progress", "C# execution is blocked. Inspect the existing execution.", Active());
                 if (compilationPending)
                     return Error("editor_busy", "Compilation or assembly reload is pending. Inspect editor readiness.");
-                if (clock() - lastHeartbeat > 30000)
-                {
-                    blockedReason = "editor_unresponsive";
-                    Save();
-                    return Error(blockedReason, "The Editor main thread has stopped responding. Restart the Editor to recover.");
-                }
                 var entry = new Entry { Id = id, Fingerprint = fingerprint, Command = command,
                     State = "queued", StartedAt = clock() };
                 entries.Add(id, entry);
@@ -176,22 +201,7 @@ namespace MCPForUnity.Editor.Services
                 }
                 Save();
                 return entry.Response ?? Error(entry.State == "not_started" ? "execution_not_started" : "execution_result_unknown",
-                    "The response wait ended. Query this execution ID; changes remain blocked while its result is unknown.", entry);
-            }
-        }
-
-        internal void Unresponsive()
-        {
-            lock (sync)
-            {
-                var active = Active();
-                if (active != null && (active.State == "running" || active.State == "unknown"))
-                {
-                    active.State = "unknown";
-                    blockedReason = "execution_result_unknown";
-                }
-                else blockedReason = "editor_unresponsive";
-                Save();
+                    "The response wait ended. Query this execution ID; further C# execution is blocked while its result is unknown.", entry);
             }
         }
 
@@ -210,7 +220,7 @@ namespace MCPForUnity.Editor.Services
                 return JsonConvert.SerializeObject(new { status = "success", result = new {
                     success = true, data = new {
                         editor_process = owner, blocked_reason = storageError != null ? "execution_storage_error" : blockedReason,
-                        changes_blocked = storageError != null || blockedReason != null || activeId != null,
+                        code_execution_blocked = storageError != null || blockedReason != null || activeId != null,
                         active_execution = Active() == null ? null : Describe(Active()),
                         recent_executions = entries.Values.OrderByDescending(e => e.StartedAt).Take(20).Select(Describe).ToArray()
                     }

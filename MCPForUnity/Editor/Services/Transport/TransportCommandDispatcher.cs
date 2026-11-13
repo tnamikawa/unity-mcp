@@ -115,11 +115,8 @@ namespace MCPForUnity.Editor.Services.Transport
                     return Task.FromResult(Ledger.Status(parameters.Value<string>("execution_id")));
                 if (cancellationToken.IsCancellationRequested)
                     return Task.FromResult(SerializeError("Request cancelled before admission"));
-                if (!CommandExecutionLedger.IsReadOnly(type, parameters))
-                {
-                    var rejection = Ledger.Admit(type, parameters, out executionId, EditorExecutionGuard.CompilationPending);
-                    if (rejection != null) return Task.FromResult(rejection);
-                }
+                var rejection = Ledger.Admit(type, parameters, out executionId, EditorExecutionGuard.CompilationPending);
+                if (rejection != null) return Task.FromResult(rejection);
             }
             catch (Exception ex) { return Task.FromResult(SerializeError("Invalid command: " + ex.Message)); }
 
@@ -271,7 +268,6 @@ namespace MCPForUnity.Editor.Services.Transport
 
             try
             {
-            Ledger.Heartbeat();
             List<(string id, PendingCommand pending)> ready;
 
             lock (PendingLock)
@@ -485,8 +481,7 @@ namespace MCPForUnity.Editor.Services.Transport
             if (pending.ExecutionId != null) response = Ledger.CancelWait(pending.ExecutionId);
             else
             {
-                if (!EditorExecutionGuard.CompilationPending) Ledger.Unresponsive();
-                response = SerializeError("Editor main thread did not answer. Changes are blocked; inspect execution status.");
+                response = SerializeError("The request wait ended before the Editor returned a response.");
             }
             pending.ResponseSource.TrySetResult(response);
             if (!pending.IsExecuting) pending.TrySetResult(response);

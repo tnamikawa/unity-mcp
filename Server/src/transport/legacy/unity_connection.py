@@ -13,7 +13,7 @@ import struct
 import threading
 import time
 from typing import Any
-from transport.execution_policy import is_read_only, prepare_execution, uncertain_response
+from transport.execution_policy import requires_code_execution, prepare_execution, uncertain_response
 
 from models.models import MCPResponse, UnityInstanceInfo
 from transport.legacy.stdio_port_registry import stdio_port_registry
@@ -289,7 +289,7 @@ class UnityConnection:
         if params is None:
             return MCPResponse(success=False, error="MCP call received with no parameters (client placeholder?)")
         params = prepare_execution(command_type, params)
-        if not is_read_only(command_type, params):
+        if requires_code_execution(command_type, params):
             max_attempts = 0
         attempts = max(config.max_retries,
                        5) if max_attempts is None else max_attempts
@@ -843,8 +843,8 @@ def send_command_with_retry(
     """
     t_retry_start = time.time()
     params = prepare_execution(command_type, params)
-    mutation = not is_read_only(command_type, params)
-    if mutation:
+    code_execution = requires_code_execution(command_type, params)
+    if code_execution:
         retry_on_reload = False
     logger.info("[TIMING-STDIO] send_command_with_retry START command=%s", command_type)
     t_get_conn = time.time()
@@ -887,10 +887,10 @@ def send_command_with_retry(
         response = conn.send_command(
             command_type, params, max_attempts=send_max_attempts, deadline=deadline)
     except Exception as exc:
-        if mutation:
+        if code_execution:
             return uncertain_response(command_type, params, str(exc) or type(exc).__name__)
         raise
-    if mutation:
+    if code_execution:
         if isinstance(response, dict) and response.get("hint") == "retry":
             response = dict(response, hint="inspect_execution", execution_id=params["execution_id"])
             for field in ("message", "error"):

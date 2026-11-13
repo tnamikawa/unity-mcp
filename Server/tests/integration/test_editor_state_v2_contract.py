@@ -14,15 +14,22 @@ from .test_helpers import DummyContext
     ("editor", {"play_mode": {"is_changing": True}}, "playmode_transition"),
     ("execution", {"is_running": True, "execution_id": "running-1"}, "execution_in_progress"),
 ])
-def test_execution_gate_states_survive_model_and_block_readiness(monkeypatch, section, details, reason):
+def test_execution_gate_states_only_block_code_readiness(monkeypatch, section, details, reason):
     monkeypatch.setattr("services.resources.editor_state._now_unix_ms", lambda: 1000)
     state = EditorStateData(
         schema_version="unity-mcp/editor_state@2", observed_at_unix_ms=1000,
         sequence=1, **{section: details},
     ).model_dump()
     enriched = _enrich_advice_and_staleness(state)
-    assert enriched["advice"]["ready_for_tools"] is False
-    assert reason in enriched["advice"]["blocking_reasons"]
+    advice = enriched["advice"]
+    assert advice["ready_for_tools"] is True
+    assert advice["blocking_reasons"] == []
+    assert advice["recommended_next_action"] == "none"
+    assert advice["ready_for_code_execution"] is False
+    assert reason in advice["code_execution_blocking_reasons"]
+    validated = EditorStateData(**enriched).model_dump()["advice"]
+    assert validated["ready_for_code_execution"] is False
+    assert validated["code_execution_blocking_reasons"] == advice["code_execution_blocking_reasons"]
 
 
 def test_stable_play_mode_is_not_a_transition(monkeypatch):

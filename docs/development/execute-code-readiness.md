@@ -16,57 +16,68 @@ pending **before** requesting compilation. The marker survives domain reload via
 after assembly reload. A callback for an older generation cannot clear a newer
 request. Failed compilation reports `compilation_failed` until a later successful
 compilation and reload; it does not permit code to run against stale assemblies.
-A request that Unity defers or never starts remains blocked, rather than being
-declared safe merely because a timeout expired.
+A deferred compilation request keeps C# execution pending until compilation and
+assembly reload complete.
 
 `mcpforunity://editor/state` includes `compilation.is_compile_pending`,
 `compilation.has_compile_errors`, and `execution.is_running`, with the active
-execution ID and start time when available. Its readiness advice includes these
-conditions and `assets.is_updating`.
+execution ID and start time when available. Its `advice.ready_for_code_execution` and
+`advice.code_execution_blocking_reasons` report these conditions and
+`assets.is_updating`. These additional gates affect code-specific advice; ordinary
+operations keep their existing readiness advice and handler behavior.
 
 ## Execution IDs and exclusive admission
 
-The shared Editor dispatcher admits one mutation at a time across HTTP, stdio,
-clients, batches, and custom tools. Unknown commands acquire this same lease.
-Diagnostic exceptions are ping, editor state, test-job status, console reads,
-code history, and execution status. Console clearing acquires the mutation lease.
+The shared Editor dispatcher admits one C# execution at a time across HTTP,
+stdio, and clients. The scope is `execute_code(action="execute"|"replay")`, plus
+`batch_execute` and `execute_custom_tool` calls containing those actions. Nested
+batches are inspected using the effective parameter keys produced by Unity's
+batch normalization. Ordinary commands and code-free wrappers pass through this
+policy, including Play stop/start, scene queries, asset searches, refresh requests,
+console clearing, and code history/status/clearing.
 
-The Python transport supplies an `execution_id` when omitted. `execute_code`
-also accepts an explicit stable ID for an intended execution or replay. A repeated
-ID with identical command/arguments returns its recorded state or cached result.
-Changed arguments produce `execution_id_conflict`. Every mutation receives an ID,
-and execution status can list recent IDs for tools whose schema omits that input.
+For calls in this scope, the Python transport supplies an `execution_id` when
+omitted. `execute_code` also accepts an explicit stable ID for an intended
+execution or replay. A repeated ID with identical command/arguments returns its
+recorded state or cached result. Changed arguments produce `execution_id_conflict`.
 
-State is stored in `Library/MCPForUnity/command-executions.json`. Admission is
+State is stored in `Library/MCPForUnity/command-executions.json`. Code admission is
 persisted before dispatch. The journal survives domain reload and transport/server
 reconnect. Full results are retained for the latest 64 eligible completions, with
-a 256 Ki-character limit per result. Older IDs and fingerprints remain recorded;
-queries report `execution_result_not_retained` when the response was evicted.
-Journal read/write failures block new mutations with `execution_storage_error`.
+a 256 Ki-character limit per result. Older code execution IDs and fingerprints
+remain recorded to prevent duplicate execution; queries report
+`execution_result_not_retained` when the response was evicted. Journal failures
+block C# execution with `execution_storage_error`. Ordinary commands receive no
+automatic execution ID, lease, or journal writes and retain their transport retry
+behavior, including each handler's explicit retry settings.
+
+On loading an older journal, ordinary command records and the former diagnostic
+`editor_unresponsive` fault are removed. Legacy batch/custom-wrapper records retain
+their execution identity because their original arguments were not stored.
+A current-format journal with unchanged state is loaded without a rewrite.
 
 ## Timeouts, status, and recovery
 
 The response wait and actual handler completion have separate completion sources.
-A timeout before handler start records `not_started` and cancels the queued work.
-A timeout after handler start records `unknown`, holds the mutation lease, and
-rejects further changes including new execution IDs. A late actual completion
-stores the result and releases the lease. Both Python transports disable automatic
-mutation resends and return `hint: inspect_execution` for uncertain outcomes.
+For a code-bearing request, a timeout before handler start records `not_started`
+and cancels the queued work. A timeout after handler start records `unknown`, holds
+the code execution lease, and rejects further code-bearing calls. A late actual
+completion stores the result and releases the lease. Both Python transports
+disable automatic resends of code-bearing requests and return
+`hint: inspect_execution` for uncertain outcomes.
 
 Query `execute_code(action="get_execution_status", execution_id="...")` to inspect
-one execution. Omit the ID to obtain the block state and the latest 20 execution
-summaries. These queries read the journal on the transport thread and remain
-available while the Unity main thread is blocked.
-The HTTP receive loop continues accepting messages while an execution waits for
-its result. Mutation admission stays exclusive, and response writes are serialized.
+one execution. Omit the ID to obtain `code_execution_blocked` and the latest 20
+execution summaries. These queries read the journal on the transport thread and
+remain available while the Unity main thread is blocked. The HTTP receive loop
+continues accepting messages while an execution waits for its result; response
+writes are serialized.
 
-An unanswered diagnostic request latches `editor_unresponsive`. New mutation
-admission also checks a 30-second main-thread heartbeat limit. Known pending
-compilation is reported as `editor_busy` without latching this health fault.
-A confirmed late completion releases a block belonging to that active execution.
-A standalone health fault requires an Editor process restart. Domain reload,
-elapsed time, a resumed heartbeat, and a new client connection preserve the block.
-On a new Editor process, outstanding records become `interrupted`; their IDs
+An unanswered diagnostic request returns its timeout/cancellation result. Idle
+time and diagnostic response delays leave the code execution lease unchanged.
+Recovery commands remain eligible for dispatch during compilation and an unknown
+code outcome; Unity handles them when its main thread can process the queue.
+On a new Editor process, outstanding code records become `interrupted`; their IDs
 remain reserved and their earlier side effects remain part of the project state.
 
 The execution boundary is the synchronous handler return or the task completion

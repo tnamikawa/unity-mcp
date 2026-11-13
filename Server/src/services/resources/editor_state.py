@@ -106,6 +106,8 @@ class EditorStateExecution(BaseModel):
 class EditorStateAdvice(BaseModel):
     ready_for_tools: bool | None = None
     blocking_reasons: list[str] | None = None
+    ready_for_code_execution: bool | None = None
+    code_execution_blocking_reasons: list[str] | None = None
     recommended_retry_after_ms: int | None = None
     recommended_next_action: str | None = None
 
@@ -204,28 +206,36 @@ def _enrich_advice_and_staleness(state_v2: dict[str, Any]) -> dict[str, Any]:
     blocking: list[str] = []
     if compilation.get("is_compiling") is True:
         blocking.append("compiling")
-    if compilation.get("is_compile_pending") is True:
-        blocking.append("compilation_pending")
-    if compilation.get("has_compile_errors") is True:
-        blocking.append("compilation_failed")
     if compilation.get("is_domain_reload_pending") is True:
         blocking.append("domain_reload")
     if tests.get("is_running") is True:
         blocking.append("running_tests")
-    if refresh.get("is_refresh_in_progress") is True or assets.get("is_updating") is True:
+    if refresh.get("is_refresh_in_progress") is True:
         blocking.append("asset_refresh")
-    if ((state_v2.get("editor") or {}).get("play_mode") or {}).get("is_changing") is True:
-        blocking.append("playmode_transition")
-    if (state_v2.get("execution") or {}).get("is_running") is True:
-        blocking.append("execution_in_progress")
     if is_stale:
         blocking.append("stale_status")
+
+    # The additional execute_code gates have their own advice scope. Recovery
+    # commands such as manage_editor.stop remain callable while these gates hold.
+    code_blocking = list(blocking)
+    if compilation.get("is_compile_pending") is True:
+        code_blocking.append("compilation_pending")
+    if compilation.get("has_compile_errors") is True:
+        code_blocking.append("compilation_failed")
+    if assets.get("is_updating") is True and "asset_refresh" not in code_blocking:
+        code_blocking.append("asset_refresh")
+    if ((state_v2.get("editor") or {}).get("play_mode") or {}).get("is_changing") is True:
+        code_blocking.append("playmode_transition")
+    if (state_v2.get("execution") or {}).get("is_running") is True:
+        code_blocking.append("execution_in_progress")
 
     ready_for_tools = len(blocking) == 0
 
     state_v2["advice"] = {
         "ready_for_tools": ready_for_tools,
         "blocking_reasons": blocking,
+        "ready_for_code_execution": len(code_blocking) == 0,
+        "code_execution_blocking_reasons": code_blocking,
         "recommended_retry_after_ms": 0 if ready_for_tools else 500,
         "recommended_next_action": "none" if ready_for_tools else "retry_later",
     }

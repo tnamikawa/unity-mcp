@@ -480,7 +480,7 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                     break;
                 case "execute":
                     // Keep receiving status queries and competing requests while a handler waits.
-                    // The shared dispatcher owns mutation admission; SendJsonAsync serializes replies.
+                    // The shared dispatcher owns C# execution admission; SendJsonAsync serializes replies.
                     _ = HandleExecuteSafelyAsync(payload, token);
                     break;
                 case "ping":

@@ -18,7 +18,7 @@ from core.constants import API_KEY_HEADER
 from models.models import MCPResponse
 from transport.plugin_registry import PluginRegistry
 from transport.blender_timeout import blender_command_timeout, SERVER_RESPONSE_GRACE
-from transport.execution_policy import is_read_only, prepare_execution, uncertain_response
+from transport.execution_policy import requires_code_execution, prepare_execution, uncertain_response
 from services.api_key_service import ApiKeyService
 
 if TYPE_CHECKING:
@@ -347,7 +347,7 @@ class PluginHub(WebSocketEndpoint):
             try:
                 await websocket.send_json(msg.model_dump())
             except Exception as exc:
-                if not is_read_only(command_type, params):
+                if requires_code_execution(command_type, params):
                     future.cancel()
                     return uncertain_response(command_type, params, str(exc) or type(exc).__name__)
                 # If send fails (socket already closing), fail the future so callers don't hang.
@@ -358,11 +358,11 @@ class PluginHub(WebSocketEndpoint):
                 result = await asyncio.wait_for(future, timeout=server_wait_s)
                 return result
             except PluginDisconnectedError as exc:
-                if not is_read_only(command_type, params):
+                if requires_code_execution(command_type, params):
                     return uncertain_response(command_type, params, str(exc))
                 return MCPResponse(success=False, error=str(exc), hint="retry").model_dump()
             except asyncio.TimeoutError:
-                if not is_read_only(command_type, params):
+                if requires_code_execution(command_type, params):
                     return uncertain_response(command_type, params, "Unity response timed out. Inspect the existing execution ID.")
                 if command_type in cls._FAST_FAIL_COMMANDS:
                     return MCPResponse(
@@ -1021,13 +1021,13 @@ class PluginHub(WebSocketEndpoint):
             retry_on_reload: If False, do not wait for session reconnect on reload.
         """
         params = prepare_execution(command_type, params)
-        mutation = not is_read_only(command_type, params)
-        if mutation:
+        code_execution = requires_code_execution(command_type, params)
+        if code_execution:
             retry_on_reload = False
 
         def unavailable(reason):
             result = cls._unavailable_retry_response(reason)
-            if mutation:
+            if code_execution:
                 result["hint"] = "inspect_execution"
                 result["error"] = "unity_session_unavailable"
                 result["message"] = "Unity connection is unavailable. Inspect the Editor connection and execution status."
