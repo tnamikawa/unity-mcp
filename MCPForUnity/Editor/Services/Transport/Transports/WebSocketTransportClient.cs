@@ -479,9 +479,7 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                     await HandleRegisteredAsync(payload, token).ConfigureAwait(false);
                     break;
                 case "execute":
-                    // Keep receiving status queries and competing requests while a handler waits.
-                    // The shared dispatcher owns C# execution admission; SendJsonAsync serializes replies.
-                    _ = HandleExecuteSafelyAsync(payload, token);
+                    await HandleExecuteAsync(payload, token).ConfigureAwait(false);
                     break;
                 case "ping":
                     await SendPongAsync(token).ConfigureAwait(false);
@@ -599,21 +597,6 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
             }
         }
 
-        private async Task HandleExecuteSafelyAsync(JObject payload, CancellationToken token)
-        {
-            try
-            {
-                await HandleExecuteAsync(payload, token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-            catch (Exception ex)
-            {
-                if (token.IsCancellationRequested) return;
-                McpLog.Warn($"[WebSocket] Command response failed: {ex.Message}");
-                await HandleSocketClosureAsync(ex.Message).ConfigureAwait(false);
-            }
-        }
-
         private async Task HandleExecuteAsync(JObject payload, CancellationToken token)
         {
             string commandId = payload.Value<string>("id");
@@ -645,8 +628,7 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                 responseJson = JsonConvert.SerializeObject(new
                 {
                     status = "error",
-                    error = $"Command '{commandName}' timed out after {timeoutSeconds} seconds. "
-                        + "The execution result is unknown. Query execute_code.get_execution_status before further changes."
+                    error = $"Command '{commandName}' timed out after {timeoutSeconds} seconds"
                 });
             }
             catch (Exception ex)

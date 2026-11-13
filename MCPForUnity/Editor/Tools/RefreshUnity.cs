@@ -153,7 +153,6 @@ namespace MCPForUnity.Editor.Tools
 
             string resultingState = EditorStateCache.GetActualIsCompiling()
                 ? "compiling"
-                : EditorExecutionGuard.CompilationPending ? "compilation_pending"
                 : (EditorApplication.isUpdating ? "asset_import" : "idle");
 
             return new SuccessResponse("Refresh requested.", new
@@ -276,7 +275,8 @@ namespace MCPForUnity.Editor.Tools
                         return;
                     }
 
-                    if (EditorExecutionGuard.CheckReadiness() == null
+                    if (!EditorStateCache.GetActualIsCompiling()
+                        && !EditorApplication.isUpdating
                         && !TestRunStatus.IsRunning
                         && !EditorApplication.isPlayingOrWillChangePlaymode)
                     {

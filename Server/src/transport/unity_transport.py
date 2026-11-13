@@ -77,8 +77,6 @@ async def send_with_unity_instance(
         retry_on_reload = kwargs.pop("retry_on_reload", True)
         if not isinstance(retry_on_reload, bool):
             retry_on_reload = True
-        if code_execution:
-            retry_on_reload = False
 
         try:
             raw = await PluginHub.send_command_for_instance(
@@ -89,7 +87,8 @@ async def send_with_unity_instance(
                 retry_on_reload=retry_on_reload,
             )
             result = normalize_unity_response(raw)
-            if code_execution and isinstance(result, dict) and result.get("hint") == "retry":
+            if (code_execution and isinstance(result, dict) and result.get("hint") == "retry"
+                    and (result.get("data") or {}).get("state") != "not_sent"):
                 result = dict(result, hint="inspect_execution")
                 result.setdefault("execution_id", params["execution_id"])
             return result

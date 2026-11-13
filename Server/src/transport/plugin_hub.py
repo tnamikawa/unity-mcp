@@ -1022,15 +1022,12 @@ class PluginHub(WebSocketEndpoint):
         """
         params = prepare_execution(command_type, params)
         code_execution = requires_code_execution(command_type, params)
-        if code_execution:
-            retry_on_reload = False
 
         def unavailable(reason):
             result = cls._unavailable_retry_response(reason)
             if code_execution:
-                result["hint"] = "inspect_execution"
                 result["error"] = "unity_session_unavailable"
-                result["message"] = "Unity connection is unavailable. Inspect the Editor connection and execution status."
+                result["message"] = "Unity connection is unavailable. The code request has not been sent."
                 result["data"] = {**(result.get("data") or {}), "execution_id": params["execution_id"], "state": "not_sent"}
             return result
         try:

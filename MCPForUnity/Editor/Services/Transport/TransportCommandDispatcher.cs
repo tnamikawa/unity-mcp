@@ -38,12 +38,14 @@ namespace MCPForUnity.Editor.Services.Transport
                 CompletionSource = completionSource;
                 CancellationToken = cancellationToken;
                 ExecutionId = executionId;
+                ResponseSource = executionId == null ? completionSource
+                    : new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
                 QueuedAt = DateTime.UtcNow;
             }
 
             public string CommandJson { get; }
             public TaskCompletionSource<string> CompletionSource { get; }
-            public TaskCompletionSource<string> ResponseSource { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public TaskCompletionSource<string> ResponseSource { get; }
             public string ExecutionId { get; }
             public CancellationToken CancellationToken { get; }
             public CancellationTokenRegistration CancellationRegistration { get; set; }
@@ -105,12 +107,8 @@ namespace MCPForUnity.Editor.Services.Transport
             EnsureInitialised();
 
             string executionId = null;
-            try
+            if (TryGetExecutionRequest(commandJson, out var type, out var parameters))
             {
-                var request = commandJson.Trim() == "ping" ? new JObject { ["type"] = "ping" } : JObject.Parse(commandJson);
-                string type = request.Value<string>("type");
-                var parameters = request["params"] as JObject ?? new JObject();
-                if (string.IsNullOrWhiteSpace(type)) return Task.FromResult(SerializeError("Command type cannot be empty"));
                 if (type == "execute_code" && parameters.Value<string>("action") == "get_execution_status")
                     return Task.FromResult(Ledger.Status(parameters.Value<string>("execution_id")));
                 if (cancellationToken.IsCancellationRequested)
@@ -118,7 +116,6 @@ namespace MCPForUnity.Editor.Services.Transport
                 var rejection = Ledger.Admit(type, parameters, out executionId, EditorExecutionGuard.CompilationPending);
                 if (rejection != null) return Task.FromResult(rejection);
             }
-            catch (Exception ex) { return Task.FromResult(SerializeError("Invalid command: " + ex.Message)); }
 
             var id = Guid.NewGuid().ToString("N");
             var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -130,15 +127,15 @@ namespace MCPForUnity.Editor.Services.Transport
                 Pending[id] = pending;
             }
 
-            // The handler completion remains alive after the caller stops waiting. In particular,
-            // async tools must be able to supply their actual result after a transport timeout.
-            tcs.Task.ContinueWith(task =>
+            // C# completion remains alive after its caller stops waiting, so the ledger
+            // can retain an unknown outcome until the actual handler finishes.
+            if (executionId != null) tcs.Task.ContinueWith(task =>
             {
                 string response = task.IsCompletedSuccessfully ? task.Result
                     : SerializeError(task.Exception?.GetBaseException().Message ?? "Handler cancelled");
                 try
                 {
-                    if (executionId != null) response = Ledger.Complete(executionId, response);
+                    response = Ledger.Complete(executionId, response);
                     pending.ResponseSource.TrySetResult(response);
                 }
                 catch (Exception ex) { pending.ResponseSource.TrySetResult(SerializeError(ex.Message)); }
@@ -157,6 +154,22 @@ namespace MCPForUnity.Editor.Services.Transport
         }
 
         internal static string GetExecutionStatus(string executionId = null) => Ledger.Status(executionId);
+
+        internal static bool TryGetExecutionRequest(string commandJson, out string type, out JObject parameters)
+        {
+            type = null;
+            parameters = null;
+            try
+            {
+                var request = JObject.Parse(commandJson);
+                type = request["type"]?.Type == JTokenType.String ? (string)request["type"] : null;
+                parameters = request["params"] as JObject ?? new JObject();
+                return CommandExecutionLedger.RequiresCodeExecution(type, parameters)
+                    || (type == "execute_code" && parameters["action"]?.ToString() == "get_execution_status");
+            }
+            catch (JsonException) { return false; }
+            catch (ArgumentException) { return false; }
+        }
 
         internal static Task<T> RunOnMainThreadAsync<T>(Func<T> func, CancellationToken cancellationToken)
         {
@@ -312,8 +325,16 @@ namespace MCPForUnity.Editor.Services.Transport
         {
             if (pending.CancellationToken.IsCancellationRequested)
             {
-                CancelPending(id, pending.CancellationToken);
-                pending.TrySetResult(SerializeError("Request cancelled before handler start"));
+                if (pending.ExecutionId == null)
+                {
+                    RemovePending(id, pending);
+                    pending.TrySetCanceled();
+                }
+                else
+                {
+                    CancelPending(id, pending.CancellationToken);
+                    pending.TrySetResult(SerializeError("Request cancelled before handler start"));
+                }
                 return;
             }
             if (pending.ExecutionId != null && !Ledger.Start(pending.ExecutionId))
@@ -412,7 +433,7 @@ namespace MCPForUnity.Editor.Services.Transport
 
                 if (result == null)
                 {
-                    // Async command: observe its actual completion independently of the response wait.
+                    // Ordinary async commands retain cleanup on the next Editor frame.
                     var capturedType = command.type;
                     var capturedParams = parameters;
                     var capturedLogType = logType;
@@ -441,7 +462,8 @@ namespace MCPForUnity.Editor.Services.Transport
                         }
                         McpLogRecord.Log(capturedType, capturedParams, capturedLogType,
                             logStatus, sw?.ElapsedMilliseconds ?? 0, logError);
-                        RemovePending(id, pending);
+                        if (pending.ExecutionId == null)
+                            EditorApplication.delayCall += () => RemovePending(id, pending);
                     }, TaskScheduler.Default);
                     return;
                 }
@@ -475,14 +497,20 @@ namespace MCPForUnity.Editor.Services.Transport
             lock (PendingLock)
             {
                 Pending.TryGetValue(id, out pending);
+                if (pending != null && pending.ExecutionId == null)
+                {
+                    Pending.Remove(id);
+                    UnhookUpdateIfIdle();
+                }
+            }
+            if (pending != null && pending.ExecutionId == null)
+            {
+                pending.TrySetCanceled();
+                pending.Dispose();
+                return;
             }
             if (pending == null || pending.CompletionSource.Task.IsCompleted || pending.ResponseSource.Task.IsCompleted) return;
-            string response;
-            if (pending.ExecutionId != null) response = Ledger.CancelWait(pending.ExecutionId);
-            else
-            {
-                response = SerializeError("The request wait ended before the Editor returned a response.");
-            }
+            string response = Ledger.CancelWait(pending.ExecutionId);
             pending.ResponseSource.TrySetResult(response);
             if (!pending.IsExecuting) pending.TrySetResult(response);
         }

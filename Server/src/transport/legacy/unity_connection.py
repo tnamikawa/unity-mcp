@@ -289,8 +289,8 @@ class UnityConnection:
         if params is None:
             return MCPResponse(success=False, error="MCP call received with no parameters (client placeholder?)")
         params = prepare_execution(command_type, params)
-        if requires_code_execution(command_type, params):
-            max_attempts = 0
+        code_execution = requires_code_execution(command_type, params)
+        send_attempted = False
         attempts = max(config.max_retries,
                        5) if max_attempts is None else max_attempts
         base_backoff = max(0.5, config.retry_delay)
@@ -351,6 +351,8 @@ class UnityConnection:
                     success=False,
                     error="Unity is reloading; please retry",
                     hint="retry",
+                    data={"state": "not_sent", "reason": "reloading", "execution_id": params["execution_id"]}
+                    if code_execution else None,
                 )
         except Exception as exc:
             logger.debug(f"Preflight status check failed: {exc}")
@@ -360,6 +362,10 @@ class UnityConnection:
                 logger.warning(
                     "Command '%s' exceeded total deadline of %.1fs after %d attempt(s); giving up",
                     command_type, total_timeout, attempt)
+                if code_execution:
+                    return {"success": False, "error": "unity_connection_unavailable",
+                            "message": "Connection wait expired before the code request was sent.",
+                            "hint": "retry", "data": {"state": "not_sent", "execution_id": params["execution_id"]}}
                 raise TimeoutError(
                     f"Command '{command_type}' exceeded total deadline of "
                     f"{total_timeout:.1f}s (connection wedged or Unity unresponsive)")
@@ -389,6 +395,9 @@ class UnityConnection:
                         logger.debug(
                             f"send {len(payload)} bytes; mode={mode}; head={payload[:32].decode('utf-8', 'ignore')}")
                     t_send_start = time.time()
+                    # A failed/partial write has an unknown outcome. Connection attempts
+                    # before this point may still use the existing bounded retry budget.
+                    send_attempted = True
                     if self.use_framing:
                         header = struct.pack('>Q', len(payload))
                         self.sock.sendall(header)
@@ -427,6 +436,8 @@ class UnityConnection:
                     raise Exception("Ping unsuccessful")
 
                 resp = json.loads(response_data.decode('utf-8'))
+                if code_execution:
+                    return resp
                 if resp.get('status') == 'error':
                     err = resp.get('error') or resp.get(
                         'message', 'Unknown Unity error')
@@ -440,6 +451,12 @@ class UnityConnection:
                         self.sock.close()
                 finally:
                     self.sock = None
+
+                if code_execution and send_attempted:
+                    return uncertain_response(command_type, params, str(e) or type(e).__name__)
+                if code_execution and attempt >= attempts:
+                    return {"success": False, "error": "unity_connection_unavailable", "message": str(e),
+                            "hint": "retry", "data": {"state": "not_sent", "execution_id": params["execution_id"]}}
 
                 # Re-discover the port for this specific instance
                 try:
@@ -844,8 +861,6 @@ def send_command_with_retry(
     t_retry_start = time.time()
     params = prepare_execution(command_type, params)
     code_execution = requires_code_execution(command_type, params)
-    if code_execution:
-        retry_on_reload = False
     logger.info("[TIMING-STDIO] send_command_with_retry START command=%s", command_type)
     t_get_conn = time.time()
     conn = get_unity_connection(instance_id)
@@ -890,7 +905,8 @@ def send_command_with_retry(
         if code_execution:
             return uncertain_response(command_type, params, str(exc) or type(exc).__name__)
         raise
-    if code_execution:
+    response_data = response.get("data") if isinstance(response, dict) else getattr(response, "data", None)
+    if code_execution and (response_data or {}).get("state") != "not_sent":
         if isinstance(response, dict) and response.get("hint") == "retry":
             response = dict(response, hint="inspect_execution", execution_id=params["execution_id"])
             for field in ("message", "error"):
@@ -904,7 +920,11 @@ def send_command_with_retry(
     retries = 0
     wait_started = None
     reason = _extract_response_reason(response)
-    while retry_on_reload and _is_reloading_response(response) and retries < max_retries and (deadline is None or time.monotonic() < deadline):
+    def may_retry_response():
+        data = response.get("data") if isinstance(response, dict) else getattr(response, "data", None)
+        return not code_execution or (data or {}).get("state") == "not_sent"
+
+    while retry_on_reload and may_retry_response() and _is_reloading_response(response) and retries < max_retries and (deadline is None or time.monotonic() < deadline):
         if wait_started is None:
             wait_started = time.monotonic()
             logger.debug(
@@ -949,6 +969,8 @@ def send_command_with_retry(
                 instance_id or "default",
                 waited,
             )
+            if code_execution:
+                return response
             return MCPResponse(
                 success=False,
                 error="Unity is reloading; please retry",
