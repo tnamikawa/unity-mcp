@@ -45,6 +45,31 @@ namespace MCPForUnityTests.Editor.Services
             AssertBlocked(gate, "compilation_pending");
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void RejectedCompilationRequestRestoresPreviousGeneration(bool wasPending)
+        {
+            var gate = new CodeExecutionGate(wasPending, false, 7);
+            gate.CompilationRequested();
+            gate.CompilationRequestFailed(gate.Generation, wasPending);
+            Assert.AreEqual(7, gate.Generation);
+            Assert.AreEqual(wasPending, gate.CompilationPending);
+            gate.ReloadCompleted(7);
+            Assert.IsNull(gate.ReadinessReason(false, false, false));
+        }
+
+        [Test]
+        public void RejectedOldRequestPreservesNewerStartedCompilation()
+        {
+            var gate = new CodeExecutionGate();
+            gate.CompilationRequested();
+            int requestGeneration = gate.Generation;
+            gate.CompilationStarted();
+            gate.CompilationRequestFailed(requestGeneration, false);
+            Assert.AreEqual(requestGeneration + 1, gate.Generation);
+            AssertBlocked(gate, "compilation_pending");
+        }
+
         [Test]
         public void PendingCompilationSurvivesDomainStateReconstruction()
         {

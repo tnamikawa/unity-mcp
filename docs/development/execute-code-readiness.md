@@ -12,9 +12,12 @@ supported. Calls made outside the Unity main thread are rejected too.
 
 Compilation requests made by `refresh_unity` and script-editing tools are marked
 pending **before** requesting compilation. The marker survives domain reload via
-`SessionState`. A successful compilation remains pending until a delayed callback
-after assembly reload. A callback for an older generation cannot clear a newer
-request. Failed compilation reports `compilation_failed` until a later successful
+`SessionState`. The `afterAssemblyReload` notification clears the generation loaded
+into that domain directly. This release is independent of Inspector updates and
+`EditorApplication.delayCall`. Requests issued during initialization or another
+reload callback retain their newer generation. A rejected compilation request
+restores the previous generation if no newer request or compilation has started.
+Failed compilation reports `compilation_failed` until a later successful
 compilation and reload; it does not permit code to run against stale assemblies.
 A deferred compilation request keeps C# execution pending until compilation and
 assembly reload complete.

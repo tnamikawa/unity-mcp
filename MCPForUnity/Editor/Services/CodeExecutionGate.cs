@@ -42,6 +42,18 @@ namespace MCPForUnity.Editor.Services
             }
         }
 
+        internal void CompilationRequestFailed(int generation, bool wasPending)
+        {
+            lock (_lock)
+            {
+                // Restore the previous request when Unity rejects this call. A newer
+                // request or started compilation owns its own generation and stays intact.
+                if (_generation != generation) return;
+                _generation--;
+                _compilationPending = wasPending;
+            }
+        }
+
         internal void CompilationFinished(bool failed)
         {
             lock (_lock)

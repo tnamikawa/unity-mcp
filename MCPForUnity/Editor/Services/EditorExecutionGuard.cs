@@ -17,6 +17,9 @@ namespace MCPForUnity.Editor.Services
         private static readonly CodeExecutionGate Gate = new CodeExecutionGate(
             SessionState.GetBool(PendingKey, false), SessionState.GetBool(FailedKey, false),
             SessionState.GetInt(GenerationKey, 0));
+        // Capture the generation loaded into this domain before other reload callbacks
+        // can request another compilation. That newer request must keep its own gate.
+        private static readonly int LoadedGeneration = Gate.Generation;
         private static bool _compileHadErrors;
         private static bool _changingPlayMode;
 
@@ -47,13 +50,10 @@ namespace MCPForUnity.Editor.Services
             };
             AssemblyReloadEvents.afterAssemblyReload += () =>
             {
-                int generation = Gate.Generation;
-                // Let all reload callbacks finish before allowing code against the new assemblies.
-                EditorApplication.delayCall += () =>
-                {
-                    Gate.ReloadCompleted(generation);
-                    SaveCompilationState();
-                };
+                // Assemblies are loaded at this notification. Inspector updates can be
+                // deferred independently, so they are not part of compilation readiness.
+                Gate.ReloadCompleted(LoadedGeneration);
+                SaveCompilationState();
             };
             EditorApplication.playModeStateChanged += state =>
                 _changingPlayMode = state == PlayModeStateChange.ExitingEditMode
@@ -70,7 +70,7 @@ namespace MCPForUnity.Editor.Services
             try { CompilationPipeline.RequestScriptCompilation(); }
             catch
             {
-                if (!wasPending) Gate.ReloadCompleted(generation);
+                Gate.CompilationRequestFailed(generation, wasPending);
                 SaveCompilationState();
                 throw;
             }
