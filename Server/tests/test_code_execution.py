@@ -21,7 +21,7 @@ def context(session="A"):
 
 @pytest.fixture
 def coordinator(tmp_path):
-    return CodeExecutionCoordinator(SlotStore(tmp_path / "slots.sqlite3"), idle_timeout=.1,
+    return CodeExecutionCoordinator(SlotStore(tmp_path / "slots.sqlite3"), idle_timeout=5.,
                                     poll_interval=.002, progress_interval=.01)
 
 
@@ -116,6 +116,7 @@ async def test_busy_wait_and_running_both_emit_progress(coordinator):
 
 @pytest.mark.asyncio
 async def test_idle_timeout_never_sends_even_after_late_probe(coordinator):
+    coordinator.idle_timeout = .1
     calls = []
 
     async def send(command, params):
@@ -367,3 +368,25 @@ async def test_only_code_admission_bypasses_middleware_reconnect_wait(monkeypatc
     else:
         resolve.assert_awaited_once()
     ctx.set_state.assert_any_await("unity_instance", "game@1234567890abcdef")
+
+
+@pytest.mark.asyncio
+async def test_rest_command_route_without_mcp_session_cannot_bypass_admission(monkeypatch):
+    import json
+    from main import create_mcp_server
+    from core.config import config
+    from transport.plugin_hub import PluginHub
+    monkeypatch.setattr(config, "http_remote_hosted", False)
+    server = create_mcp_server(project_scoped_tools=True)
+    app = server.http_app()
+    route = next(route for route in app.routes if route.path == "/api/command")
+    sessions = AsyncMock()
+    monkeypatch.setattr(PluginHub, "get_sessions", sessions)
+    for command, params in [
+        ("execute_code", PARAMS),
+        ("batch_execute", {"commands": [{"tool": "execute_code", "params": PARAMS}]}),
+        ("execute_custom_tool", {"tool_name": "execute_code", "parameters": PARAMS}),
+    ]:
+        result = await route.endpoint(SimpleNamespace(json=AsyncMock(return_value={"type": command, "params": params})))
+        assert json.loads(result.body)["error"] == "code_execution_session_required"
+    sessions.assert_not_called()

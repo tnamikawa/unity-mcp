@@ -424,6 +424,14 @@ def create_mcp_server(project_scoped_tools: bool) -> FastMCP:
                 if not command_type:
                     return JSONResponse({"success": False, "error": "Missing 'type' field"}, status_code=400)
 
+                # This REST convenience route has no authenticated MCP session.
+                # C# execution must use MCP admission, including containing batches.
+                from transport.execution_policy import requires_code_execution
+                if requires_code_execution(command_type, params):
+                    return JSONResponse({"success": False,
+                        "error": "code_execution_session_required",
+                        "data": {"state": "not_started"}})
+
                 # Get available sessions
                 sessions = await PluginHub.get_sessions()
                 if not sessions.sessions:

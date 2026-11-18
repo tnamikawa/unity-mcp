@@ -27,7 +27,10 @@ An occupied slot is matched only by its owning MCP session. HTTP uses
 `MCP-Session-Id`; stdio uses FastMCP's per-connection UUID (`ctx.session_id`).
 The user approved this interpretation on 2026-11-18. The same session attaches to
 the occupied operation even when its source or supplied execution ID changes.
-A new MCP session is a separate owner. An unavailable session identity fails
+A new MCP session is a separate owner. The local REST convenience endpoint
+`/api/command` has no MCP session and rejects code-bearing requests, including
+batches and custom wrappers, before Unity discovery. Its ordinary command path
+is unchanged. An unavailable session identity fails
 closed with `code_execution_session_required` before admission.
 
 Another session immediately receives `code_execution_slot_occupied`, with the
