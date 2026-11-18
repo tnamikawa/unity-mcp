@@ -11,6 +11,7 @@ from services.registry import mcp_for_unity_tool
 from services.tools import get_unity_instance_from_context
 from transport.unity_transport import send_with_unity_instance
 from transport.legacy.unity_connection import async_send_command_with_retry
+from transport.execution_policy import requires_code_execution
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,12 @@ async def batch_execute(
         raise ValueError(
             "'commands' must be a non-empty list of command specifications")
 
-    max_commands = await _get_max_commands_from_editor_state(ctx)
+    # Code-bearing calls must reach session admission before any live Editor
+    # lookup. Unity applies its configured limit after the slot is admitted.
+    # Ordinary batches retain their existing configured-limit preflight.
+    code_bearing = requires_code_execution("batch_execute", {"commands": commands})
+    max_commands = (ABSOLUTE_MAX_COMMANDS_PER_BATCH if code_bearing
+                    else await _get_max_commands_from_editor_state(ctx))
     if len(commands) > max_commands:
         raise ValueError(
             f"batch_execute supports up to {max_commands} commands (configured in Unity); received {len(commands)}"

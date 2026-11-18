@@ -52,7 +52,10 @@ Python asynchronously probes `get_editor_state` before dispatch and applies the
 existing Python advice/staleness enrichment to the raw Unity snapshot. The
 instance middleware skips reconnect validation specifically for code-bearing
 calls, so slot admission and foreign-session refusal precede reconnect waits.
-Concrete `Name@hash` routes remain usable during reload. It waits for
+Concrete `Name@hash` routes remain usable during reload. Code-bearing batches
+skip the Python configured-limit Editor lookup before admission, retain the hard
+100-command ceiling, and use the existing Unity-side configured-limit check.
+Code-free batches keep their existing Python preflight. It waits for
 `advice.ready_for_code_execution`: compilation, pending compilation/reload,
 Play Mode transition and asset refresh/import block code dispatch. Stable Play
 Mode remains supported. `UNITY_MCP_CODE_IDLE_TIMEOUT_SECONDS` configures this

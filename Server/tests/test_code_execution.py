@@ -403,3 +403,25 @@ asyncio.run(check())
     script = "import sys; sys.path.insert(0, " + repr(str(Path(__file__).parents[1] / "src")) + ")\n" + script
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_code", [True, False])
+async def test_batch_frontend_reaches_admission_without_code_readiness_preflight(monkeypatch, has_code):
+    import importlib
+    batch = importlib.import_module("services.tools.batch_execute")
+    ctx = context()
+    limit = AsyncMock(return_value=25)
+    send = AsyncMock(return_value={"success": False, "error": "code_execution_slot_occupied"})
+    monkeypatch.setattr(batch, "_get_max_commands_from_editor_state", limit)
+    monkeypatch.setattr(batch, "get_unity_instance_from_context", AsyncMock(return_value="game@1234567890abcdef"))
+    monkeypatch.setattr(batch, "send_with_unity_instance", send)
+    commands = [{"tool": "execute_code", "params": PARAMS}] if has_code else [
+        {"tool": "manage_editor", "params": {"action": "stop"}}]
+    result = await batch.batch_execute(ctx, commands)
+    assert result["error"] == "code_execution_slot_occupied"
+    send.assert_awaited_once()
+    if has_code:
+        limit.assert_not_called()
+    else:
+        limit.assert_awaited_once_with(ctx)
