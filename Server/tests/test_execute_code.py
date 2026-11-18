@@ -140,7 +140,7 @@ def test_null_message_preserves_error_and_execution_details(monkeypatch, error):
     assert result["success"] is False
     assert result["error"] == error
     assert result["message"]
-    assert result["hint"] == "retry"
+    assert "hint" not in result
     assert result["data"] == response["data"]
     if error == "TimeoutError":
         assert "may still be running" in result["message"]

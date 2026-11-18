@@ -110,7 +110,7 @@ namespace MCPForUnity.Editor.Services.Transport
             if (TryGetExecutionRequest(commandJson, out var type, out var parameters))
             {
                 if (type == "execute_code" && parameters.Value<string>("action") == "get_execution_status")
-                    return Task.FromResult(Ledger.Status(parameters.Value<string>("execution_id")));
+                    return Task.FromResult(Ledger.Status(parameters.Value<string>("execution_id"), parameters.Value<bool>("settle_unstarted")));
                 if (cancellationToken.IsCancellationRequested)
                     return Task.FromResult(SerializeError("Request cancelled before admission"));
                 var rejection = Ledger.Admit(type, parameters, out executionId, EditorExecutionGuard.CompilationPending);
@@ -336,6 +336,17 @@ namespace MCPForUnity.Editor.Services.Transport
                     pending.TrySetResult(SerializeError("Request cancelled before handler start"));
                 }
                 return;
+            }
+            if (pending.ExecutionId != null)
+            {
+                // One readiness check, then yield to Python on a race with busy.
+                // No Editor polling or wait loop is introduced.
+                var readiness = EditorExecutionGuard.CheckReadiness();
+                if (readiness != null)
+                {
+                    pending.TrySetResult(JsonConvert.SerializeObject(new { status = "success", result = readiness }));
+                    return;
+                }
             }
             if (pending.ExecutionId != null && !Ledger.Start(pending.ExecutionId))
             {

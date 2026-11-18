@@ -34,6 +34,54 @@ namespace MCPForUnityTests.Editor.Services
         private string Admit(string id = "first", string code = "return 42;") => ledger.Admit("execute_code", Request(id, code), out _);
 
         [Test]
+        public void SettlingMissingIdPreventsDelayedAdmissionAcrossReload()
+        {
+            Assert.AreEqual("not_started", Result(ledger.Status("first", true))["data"]["execution"].Value<string>("state"));
+            Assert.IsNotNull(Admit());
+            ledger = new CommandExecutionLedger(path, "process-A", () => now);
+            Assert.IsNotNull(Admit());
+            Assert.IsNull(Admit("next"));
+        }
+
+        [Test]
+        public void SettlingQueuedIdPreventsLateStartAndReleasesSlot()
+        {
+            Admit();
+            Assert.AreEqual("not_started", Result(ledger.Status("first", true))["data"]["execution"].Value<string>("state"));
+            Assert.IsFalse(ledger.Start("first"));
+            Assert.IsNull(Admit("next"));
+        }
+
+        [Test]
+        public void SettlingRunningIdPreservesActiveExecution()
+        {
+            Admit(); ledger.Start("first");
+            Assert.AreEqual("running", Result(ledger.Status("first", true))["data"]["execution"].Value<string>("state"));
+            Assert.IsNotNull(Admit("next"));
+            ledger.Complete("first", Success);
+            Assert.IsNull(Admit("next"));
+        }
+
+        [Test]
+        public void QueuedWorkDiscardedByReloadIsUnstarted()
+        {
+            Admit();
+            ledger = new CommandExecutionLedger(path, "process-A", () => now);
+            Assert.AreEqual("not_started", Result(ledger.Status("first"))["data"]["execution"].Value<string>("state"));
+            Assert.IsFalse(ledger.Start("first"));
+            Assert.IsNull(Admit("next"));
+        }
+
+        [Test]
+        public void BusyBeforeStartDefersWithoutReservingAnExecutedId()
+        {
+            Admit();
+            ledger.Complete("first", "{\"status\":\"success\",\"result\":{\"success\":false,\"error\":\"editor_busy\"}}");
+            Assert.IsNull(Admit());
+            Assert.IsTrue(ledger.Start("first"));
+        }
+
+        [Test]
         public void ConcurrentClientsAdmitOnlyOneCodeExecution()
         {
             var responses = new string[12];
@@ -119,7 +167,7 @@ namespace MCPForUnityTests.Editor.Services
         {
             Admit(); ledger.Start("first");
             ledger = new CommandExecutionLedger(path, "process-A", () => now);
-            Assert.AreEqual("execution_result_unknown", Result(Admit("new")).Value<string>("error"));
+            Assert.AreEqual("interrupted", Result(ledger.Status("first"))["data"]["execution"].Value<string>("state"));
             ledger = new CommandExecutionLedger(path, "process-B", () => now);
             Assert.AreEqual("interrupted", Result(ledger.Status("first"))["data"]["execution"].Value<string>("state"));
             Assert.IsNotNull(Admit());

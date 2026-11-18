@@ -65,13 +65,10 @@ namespace MCPForUnity.Editor.Services
                     if (IsOutstanding(entry))
                     {
                         changed = true;
-                        entry.State = restarted ? "interrupted" : "unknown";
+                        // A new ledger instance belongs to a newly loaded AppDomain.
+                        // Work from the old domain has ended, including tasks/callbacks.
+                        entry.State = entry.State == "queued" ? "not_started" : "interrupted";
                         entry.Response = null;
-                        if (!restarted)
-                        {
-                            activeId = entry.Id;
-                            blockedReason = "execution_result_unknown";
-                        }
                     }
                 }
                 if (changed) Save();
@@ -164,6 +161,14 @@ namespace MCPForUnity.Editor.Services
             lock (sync)
             {
                 var entry = entries[id];
+                var deferred = JObject.Parse(response)["result"] as JObject;
+                if (entry.State == "queued" && deferred?.Value<string>("error") == "editor_busy")
+                {
+                    entries.Remove(id);
+                    if (activeId == id) activeId = null;
+                    Save();
+                    return response;
+                }
                 if (IsOutstanding(entry)) entry.State = "completed";
                 entry.Response = response.Length <= 262144 ? response : null;
                 var envelope = JObject.Parse(response);
@@ -205,14 +210,32 @@ namespace MCPForUnity.Editor.Services
             }
         }
 
-        internal string Status(string id = null)
+        internal string Status(string id = null, bool settleUnstarted = false)
         {
             lock (sync)
             {
                 if (id != null)
                 {
+                    if (settleUnstarted && storageError != null)
+                        return Error("execution_storage_error", "Execution journal unavailable: " + storageError);
                     if (!entries.TryGetValue(id, out var entry))
-                        return Error("execution_not_found", "No execution has been admitted with this ID.");
+                    {
+                        if (!settleUnstarted)
+                            return Error("execution_not_found", "No execution has been admitted with this ID.");
+                        // Reserve the ID atomically: a delayed transport send can never
+                        // start after Python has reported this request as unexecuted.
+                        entry = new Entry { Id = id, Command = "execute_code", Fingerprint = "settled-unstarted",
+                            State = "not_started", StartedAt = clock() };
+                        entries.Add(id, entry);
+                        if (!Save()) return Error("execution_storage_error", "Could not settle the execution.");
+                    }
+                    if (settleUnstarted && entry.State == "queued")
+                    {
+                        entry.State = "not_started";
+                        if (activeId == id) activeId = null;
+                        if (blockedReason == "execution_result_unknown") blockedReason = null;
+                        if (!Save()) return Error("execution_storage_error", "Could not settle the execution.");
+                    }
                     return JsonConvert.SerializeObject(new { status = "success", result = new {
                         success = true, data = new { execution = Describe(entry), response = entry.Response == null ? null : JToken.Parse(entry.Response) }
                     }});

@@ -12,7 +12,7 @@ description: "Execute arbitrary C# code inside the Unity Editor."
 
 ## Description
 
-Execute arbitrary C# code inside the Unity Editor. The code runs as a method body with access to UnityEngine and UnityEditor namespaces. Use 'return' to send data back. Compiled in-memory — no script files created. Actions: execute (run code), get_history (list past executions), replay (re-run a history entry), clear_history, get_execution_status. Use a stable execution_id for each intended execution. Reusing it returns the existing result. After a timeout/disconnect query get_execution_status; do not resubmit the operation. NOTE: safety_checks blocks known dangerous patterns but is not a full sandbox. Compiler options: 'auto' (Roslyn if available, else CodeDom), 'roslyn' (C# 12+, requires Microsoft.CodeAnalysis), 'codedom' (C# 6 only).
+Execute arbitrary C# code inside the Unity Editor. The code runs as a method body with access to UnityEngine and UnityEditor namespaces. Use 'return' to send data back. Compiled in-memory — no script files created. Actions: execute (run code), get_history (list past executions), replay (re-run a history entry), clear_history, get_execution_status. One execution slot per Unity. Calls wait through Editor busy states and until completion. While occupied, calls from the same MCP session attach to its existing result; other sessions are refused. NOTE: safety_checks blocks known dangerous patterns but is not a full sandbox. Compiler options: 'auto' (Roslyn if available, else CodeDom), 'roslyn' (C# 12+, requires Microsoft.CodeAnalysis), 'codedom' (C# 6 only).
 
 ## Parameters
 

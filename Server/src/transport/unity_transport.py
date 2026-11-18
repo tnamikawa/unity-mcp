@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Awaitable, Callable, TypeVar
 
 from transport.plugin_hub import InstanceSelectionRequiredError, PluginHub
@@ -40,7 +41,7 @@ async def _resolve_user_id_from_request() -> str | None:
         return None
 
 
-async def send_with_unity_instance(
+async def _send_with_unity_instance_raw(
     send_fn: Callable[..., Awaitable[T]],
     unity_instance: str | None,
     *args,
@@ -121,3 +122,60 @@ async def send_with_unity_instance(
     if unity_instance:
         kwargs.setdefault("instance_id", unity_instance)
     return await send_fn(*args, **kwargs)
+
+
+async def send_with_unity_instance(send_fn, unity_instance, *args, user_id=None, **kwargs):
+    # Only C# execution and containing wrappers enter admission. All other calls
+    # retain the exact original transport path, deadlines, retries and cancellation.
+    command = args[0] if args else None
+    params = args[1] if len(args) > 1 else kwargs.get("params")
+    if not requires_code_execution(command, params):
+        return await _send_with_unity_instance_raw(
+            send_fn, unity_instance, *args, user_id=user_id, **kwargs)
+
+    from fastmcp.server.dependencies import get_context
+    from transport.code_execution import get_coordinator, error
+    try:
+        ctx = get_context()
+    except RuntimeError:
+        return error("code_execution_session_required", state="not_started")
+    if user_id is None:
+        user_id = await _resolve_user_id_from_request()
+    if config.http_remote_hosted and not user_id:
+        return error("auth_required", state="not_started")
+    # Middleware supplies a resolved Name@hash. Resolve aliases for internal
+    # callers too, so different spellings/transports cannot acquire two slots.
+    instance = unity_instance or await ctx.get_state("unity_instance")
+    if _is_http_transport():
+        sessions = (await PluginHub.get_sessions(user_id=user_id)).sessions
+        matches = [(sid, details) for sid, details in sessions.items()
+                   if not instance or instance in {details.hash, details.project,
+                                                   details.project + "@" + details.hash}
+                   or details.hash.startswith(instance)]
+        if len(matches) == 1:
+            instance = matches[0][1].hash
+        elif instance and "@" in instance:
+            instance = instance.rsplit("@", 1)[1]
+        elif instance and re.fullmatch(r"[0-9a-fA-F]{16,64}", instance):
+            pass  # Full instance hash remains stable across a plugin reconnect.
+        else:
+            return error("code_execution_instance_required", state="not_started")
+    else:
+        from transport.legacy.stdio_port_registry import stdio_port_registry
+        info = stdio_port_registry.get_instance(instance)
+        if info is None and not (instance and "@" in instance):
+            return error("code_execution_instance_required", state="not_started")
+        target = info.id if info else instance
+        instance = target.rsplit("@", 1)[-1]
+    if _is_http_transport():
+        target = instance
+    code_kwargs = dict(kwargs)
+    code_kwargs.pop("params", None)
+
+    async def send(command, arguments):
+        return await _send_with_unity_instance_raw(
+            send_fn, target, command, arguments, user_id=user_id,
+            **{**code_kwargs, "retry_on_reload": False})
+
+    return await get_coordinator().run(ctx, (user_id or "local") + ":" + instance,
+                                     command, params, send)

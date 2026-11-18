@@ -9,7 +9,7 @@ from services.tools.execute_code import execute_code
 from transport.execution_policy import requires_code_execution, prepare_execution
 from transport.legacy import unity_connection
 from transport.plugin_hub import PluginDisconnectedError, PluginHub
-from transport.unity_transport import send_with_unity_instance
+from transport.unity_transport import send_with_unity_instance, _send_with_unity_instance_raw
 
 
 @pytest.mark.parametrize("command,params,expected", [
@@ -108,7 +108,7 @@ def test_http_wrapper_preserves_connection_wait_and_sanitizes_unknown_hint(monke
     monkeypatch.setattr(config, "http_remote_hosted", False)
     send = AsyncMock(return_value={"success": False, "hint": "retry", "error": "disconnected"})
     monkeypatch.setattr(PluginHub, "send_command_for_instance", send)
-    result = asyncio.run(send_with_unity_instance(AsyncMock(), "project", "execute_code", {"action": "execute"}))
+    result = asyncio.run(_send_with_unity_instance_raw(AsyncMock(), "project", "execute_code", {"action": "execute"}))
     assert send.await_count == 1
     assert send.call_args.kwargs["retry_on_reload"] is True
     assert result["hint"] == "inspect_execution"
@@ -180,7 +180,7 @@ def test_unsent_http_code_preserves_retry_hint_and_id(monkeypatch):
     monkeypatch.setattr(PluginHub, "_registry", Mock(list_sessions=AsyncMock(return_value={})))
     send = AsyncMock()
     monkeypatch.setattr(PluginHub, "send_command", send)
-    result = asyncio.run(send_with_unity_instance(AsyncMock(), None, "execute_code",
+    result = asyncio.run(_send_with_unity_instance_raw(AsyncMock(), None, "execute_code",
         {"action": "execute", "execution_id": "unsent"}, retry_on_reload=False))
     assert result["hint"] == "retry"
     assert result["data"]["state"] == "not_sent"

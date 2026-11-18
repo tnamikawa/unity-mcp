@@ -1,96 +1,141 @@
-# Execute code readiness
+# Execute code admission and completion
 
-`execute_code` checks the live Editor state before compiling a snippet and again
-before invoking it. The same handler covers `replay` and calls from `batch_execute`.
-The check is independent of `safety_checks`; disabling the string-pattern filter
-does not disable readiness checks.
+## Scope
 
-Execution is rejected with `editor_busy` and a `data.reason` while scripts are
-compiling, a compilation request or assembly reload is pending, assets are being
-updated, or the Editor is entering or leaving Play Mode. Stable Play Mode remains
-supported. Calls made outside the Unity main thread are rejected too.
+Python owns one admission slot per Unity instance for `execute_code` actions
+`execute` and `replay`, including code-bearing `batch_execute` and
+`execute_custom_tool` wrappers. A wrapper is one execution unit, and its complete
+handler result is returned. Code-free wrappers, queries, ping, Play/Stop, refresh,
+ordinary transport ordering, cancellation and stdio behavior use the existing
+transport path. The `refresh_unity` readiness conditions are unchanged.
 
-Compilation requests made by `refresh_unity` and script-editing tools are marked
-pending **before** requesting compilation. The marker survives domain reload via
-`SessionState`. The `afterAssemblyReload` notification clears the generation loaded
-into that domain directly. This release is independent of Inspector updates and
-`EditorApplication.delayCall`. Requests issued during initialization or another
-reload callback retain their newer generation. A rejected compilation request
-restores the previous generation if no newer request or compilation has started.
-Failed compilation reports `compilation_failed` until a later successful
-compilation and reload; it does not permit code to run against stale assemblies.
-A deferred compilation request keeps C# execution pending until compilation and
-assembly reload complete.
+Luna independent review remains mandatory in the existing client hooks. A refused
+or failed review stops execution. This change preserves those hooks and the
+compilation guard release on `afterAssemblyReload` from `b65e04b7`.
 
-`mcpforunity://editor/state` includes `compilation.is_compile_pending`,
-`compilation.has_compile_errors`, and `execution.is_running`, with the active
-execution ID and start time when available. Its `advice.ready_for_code_execution` and
-`advice.code_execution_blocking_reasons` report these conditions and
-`assets.is_updating`. These additional gates affect code-specific advice; ordinary
-operations keep their existing readiness advice and handler behavior.
+## Ownership and reconnecting clients
 
-## Execution IDs and exclusive admission
+The instance key is the resolved project hash, qualified by the authenticated
+user for remote hosting. Aliases (`Name@hash`, project name, hash prefix) resolve
+to that key before admission. HTTP and stdio processes on the same machine share
+`~/.unity-mcp/code-execution-slots.sqlite3`. SQLite's unique active-slot index and
+transactions arbitrate admission; the database stores ownership and results, never
+submitted C# source. It is runtime state, with Unity's journal providing the
+execution record.
 
-The shared Editor dispatcher admits one C# execution at a time across HTTP,
-stdio, and clients. The scope is `execute_code(action="execute"|"replay")`, plus
-`batch_execute` and `execute_custom_tool` calls containing those actions. Nested
-batches are inspected using the effective parameter keys produced by Unity's
-batch normalization. Ordinary commands and code-free wrappers pass through this
-policy, including Play stop/start, scene queries, asset searches, refresh requests,
-console clearing, and code history/status/clearing.
+An occupied slot is matched only by its owning MCP session. HTTP uses
+`MCP-Session-Id`; stdio uses FastMCP's per-connection UUID (`ctx.session_id`).
+The user approved this interpretation on 2026-11-18. The same session attaches to
+the occupied operation even when its source or supplied execution ID changes.
+A new MCP session is a separate owner. An unavailable session identity fails
+closed with `code_execution_session_required` before admission.
 
-For calls in this scope, the Python transport supplies an `execution_id` when
-omitted. `execute_code` also accepts an explicit stable ID for an intended
-execution or replay. A repeated ID with identical command/arguments returns its
-recorded state or cached result. Changed arguments produce `execution_id_conflict`.
+Another session immediately receives `code_execution_slot_occupied`, with the
+occupying execution ID, waiting/running/reconciling phase, and elapsed seconds.
+There is no queue and no automatic resubmission of code after an uncertain send.
+Code responses omit retry hints and retry-after fields.
 
-State is stored in `Library/MCPForUnity/command-executions.json`. Code admission is
-persisted before dispatch. The journal survives domain reload and transport/server
-reconnect. Full results are retained for the latest 64 eligible completions, with
-a 256 Ki-character limit per result. Older code execution IDs and fingerprints
-remain recorded to prevent duplicate execution; queries report
-`execution_result_not_retained` when the response was evicted. Journal failures
-block C# execution with `execution_storage_error`. Ordinary commands receive no
-automatic execution ID, lease, or journal writes and retain their transport retry
-behavior, including each handler's explicit retry settings.
+Workers outlive individual MCP requests. Losing an MCP response or cancelling a
+waiter does not cancel the worker or release its slot. A 5-second ownership
+heartbeat arbitrates server-process recovery. After 30 seconds without that
+heartbeat, a subsequent request can start journal reconciliation of the abandoned
+slot; it never dispatches its old source. A different session is still rejected
+immediately while reconciliation runs. A heartbeat expiry itself never establishes
+that Unity execution has ended.
 
-On loading an older journal, ordinary command records and the former diagnostic
-`editor_unresponsive` fault are removed. Legacy batch/custom-wrapper records retain
-their execution identity because their original arguments were not stored.
-A current-format journal with unchanged state is loaded without a rewrite.
+## Readiness and completion
 
-## Timeouts, status, and recovery
+Python asynchronously probes `get_editor_state` before dispatch. It waits for
+`advice.ready_for_code_execution`: compilation, pending compilation/reload,
+Play Mode transition and asset refresh/import block code dispatch. Stable Play
+Mode remains supported. `UNITY_MCP_CODE_IDLE_TIMEOUT_SECONDS` configures this
+wait (default 600 seconds; a positive finite value is required).
 
-Code-bearing requests use separate completion sources for the response wait and
-actual handler completion. Ordinary requests retain the original cancellation and
-next-Editor-frame cleanup behavior. A code timeout before handler start records `not_started`
-and cancels the queued work. A timeout after handler start records `unknown`, holds
-the code execution lease, and rejects further code-bearing calls. A late actual
-completion stores the result and releases the lease. Both Python transports
-disable automatic resends after a code-bearing request has entered the send phase
-and return `hint: inspect_execution` for uncertain outcomes. Connection/reload waits
-before the first send retain their existing budgets and explicit caller settings.
-An unavailable connection before sending reports `state: not_sent` with a retry hint.
+Idle expiry atomically marks the server slot completed with
+`code_idle_wait_timeout`, `state=not_started`, `execution_started=false`. The
+worker checks its deadline and ownership before dispatch; an expired request has
+no queued execute task that could run later. A readiness probe can be cancelled
+at the deadline because it only reads state.
 
-Query `execute_code(action="get_execution_status", execution_id="...")` to inspect
-one execution. Omit the ID to obtain `code_execution_blocked` and the latest 20
-execution summaries. These queries read the journal on the transport thread and
-remain available while the Unity main thread is blocked, once the transport has
-finished the preceding response wait. WebSocket messages retain sequential handling.
-Stdio keeps its original ping response, command queue, timeout budget, and broker
-resend deduplication for ordinary requests. Only code-bearing calls and execution
-status queries use the shared dispatcher from the stdio receive path.
+Unity checks readiness once again on the main thread immediately before starting
+a code-bearing handler. A busy race defers that queued admission without starting
+it, allowing Python to wait again using the same execution ID. Unity adds no
+readiness polling or waiting loop. The existing handler-level guard also checks
+before compilation and invocation, independently of `safety_checks`.
 
-An unanswered diagnostic request returns its timeout/cancellation result. Idle
-time and diagnostic response delays leave the code execution lease unchanged.
-Recovery commands remain eligible for dispatch during compilation and an unknown
-code outcome; Unity handles them when its main thread can process the queue.
-The refresh completion wait retains its original compilation, asset-update, test,
-and Play Mode conditions.
-On a new Editor process, outstanding code records become `interrupted`; their IDs
-remain reserved and their earlier side effects remain part of the project state.
+The Python call returns when the handler completes, with its success or failure.
+Existing transport response deadlines can end a single bridge wait. Python then
+keeps the slot and reconciles Unity's journal instead of reporting a transient
+unknown result as the final MCP response. Ordinary bridge deadlines and
+cancellation behavior are preserved.
 
-The execution boundary is the synchronous handler return or the task completion
-reported by an asynchronous MCP handler. Arbitrary callbacks scheduled by user C#
-after returning have a separate lifetime. Managed callback jobs and automatic
-test splitting are outside this change's scope.
+Every 12 seconds each attached request calls `ctx.report_progress`, including the
+phase and occupying execution ID. MCP progress notifications require the client's
+request `_meta.progressToken`. The MCP client integration test verifies tokened
+notifications in both waiting and running phases. A notification delivery failure
+has no effect on worker ownership. Notification support and overall client
+execution deadlines remain separate client capabilities.
+
+## Unity journal and recovery
+
+`Library/MCPForUnity/command-executions.json` remains the execution journal.
+Admission is persisted before dispatch. IDs and fingerprints retain their existing
+replay protection. Complete responses are retained for the latest 64 eligible
+completions, up to 256 Ki-characters each. Journal storage errors block execution.
+
+After a failed response wait or reconnect, Python queries
+`execute_code(action="get_execution_status", execution_id=...)`. Its internal
+`settle_unstarted=true` option atomically settles an absent or queued execution as
+`not_started`. An absent ID receives a durable tombstone; a delayed send cannot
+admit it afterward. Settling an already running/unknown execution leaves it active.
+The public status query keeps its existing read-only behavior without that option.
+
+- A completed journal entry supplies its stored result and releases the slot.
+- A settled unstarted entry releases it with `execution_not_started`.
+- Running/unknown entries retain it and continue reconciliation.
+- A new Unity process or AppDomain marks discarded queued work `not_started` and
+  work that had started `interrupted`. Old-domain tasks have ended; their IDs stay
+  reserved. Reconciliation releases these slots with `execution_interrupted`.
+
+Transport unresponsiveness alone never changes those journal states. Recovery
+operations remain eligible while a code slot is occupied. Unity processes their
+existing command queues when its main thread can service them. Install the matching
+Python server and Unity package when deploying this protocol.
+
+## Client configuration
+
+- Claude Code: each UnityMCP registration has `timeout: 600000` milliseconds;
+  `~/.claude/settings.json` has
+  `env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS: "0"`.
+- Codex: global and existing project UnityMCP sections use
+  `tool_timeout_sec = 600`.
+- Antigravity: UnityMCP entries use `timeoutSeconds: 600`.
+- hysp's `ruby/ishinoura_project_settings.rb` generates the same project timeouts
+  and Antigravity global entries so later deployment preserves these values.
+
+Official references: [Claude environment variables](https://code.claude.com/docs/en/env-vars),
+[Codex configuration](https://developers.openai.com/codex/config-reference/),
+[Antigravity MCP](https://antigravity.google/docs/mcp).
+
+## Deployment and validation
+
+Follow the 2026-11-12 through 2026-11-14 deployment record: commit/push this fork's
+main, pull hysp, update `ruby/modify_manifest_json.rb` and its package manifest,
+commit/push hysp, update all present target workspace project manifests, then use
+UnityMCP `manage_packages` to resolve the pinned package in each running Editor.
+Verify the running server revision, installed package source, completed compilation,
+zero compile errors, and the live acceptance scenarios before reporting activation.
+
+Unit tests cover admission, same-session attachment, client cancellation, busy
+waiting and expiry, progress delivery, independent instances, durable cross-process
+arbitration, journal reconciliation, and bypass for ordinary/recovery commands.
+C# tests cover tombstones, queued cancellation, actual completion, reload disposal,
+readiness and existing code-only scope. Live roomlariat checks additionally require
+a connected UnityMCP server, two sessions, a side-effect counter and domain reload.
+
+## Known execution boundary
+
+The slot ends at synchronous handler return or the completion of an asynchronous
+MCP handler. C# that registers `EditorApplication.update` callbacks and returns
+releases the slot at that return; subsequent callbacks are outside this execution
+manager. Managed callback jobs are outside this change.

@@ -15,6 +15,7 @@ from mcp.types import ToolAnnotations
 from services.registry import mcp_for_unity_tool
 from services.tools import get_unity_instance_from_context
 from transport.unity_transport import send_with_unity_instance
+from transport.code_execution import without_retry
 from transport.legacy.unity_connection import async_send_command_with_retry
 
 
@@ -25,8 +26,8 @@ from transport.legacy.unity_connection import async_send_command_with_retry
         "Use 'return' to send data back. Compiled in-memory — no script files created. "
         "Actions: execute (run code), get_history (list past executions), "
         "replay (re-run a history entry), clear_history, get_execution_status. "
-        "Use a stable execution_id for each intended execution. Reusing it returns the existing result. "
-        "After a timeout/disconnect query get_execution_status; do not resubmit the operation. "
+        "One execution slot per Unity. Calls wait through Editor busy states and until completion. "
+        "While occupied, calls from the same MCP session attach to its existing result; other sessions are refused. "
         "NOTE: safety_checks blocks known dangerous patterns but is not a full sandbox. "
         "Compiler options: 'auto' (Roslyn if available, else CodeDom), 'roslyn' (C# 12+, requires Microsoft.CodeAnalysis), 'codedom' (C# 6 only)."
     ),
@@ -106,7 +107,7 @@ async def execute_code(
 
     # A normalized transport error includes message=None. dict.get's default does
     # not apply to that value; preserve both the actual error and readiness details.
-    result = dict(response)
+    result = without_retry(response)
     result["success"] = response.get("success", False)
     result["message"] = response.get("message") or response.get("error") or ""
     result["data"] = response.get("data")
