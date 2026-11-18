@@ -370,23 +370,36 @@ async def test_only_code_admission_bypasses_middleware_reconnect_wait(monkeypatc
     ctx.set_state.assert_any_await("unity_instance", "game@1234567890abcdef")
 
 
-@pytest.mark.asyncio
-async def test_rest_command_route_without_mcp_session_cannot_bypass_admission(monkeypatch):
-    import json
-    from main import create_mcp_server
-    from core.config import config
-    from transport.plugin_hub import PluginHub
-    monkeypatch.setattr(config, "http_remote_hosted", False)
-    server = create_mcp_server(project_scoped_tools=True)
-    app = server.http_app()
+def test_rest_command_route_without_mcp_session_cannot_bypass_admission():
+    # Importing main configures process logging; isolate the real app route test
+    # so infrastructure characterization tests retain their original logging.
+    import subprocess
+    import sys
+    from pathlib import Path
+    script = r"""
+import asyncio, json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from main import create_mcp_server
+from core.config import config
+from transport.plugin_hub import PluginHub
+async def check():
+    config.http_remote_hosted = False
+    app = create_mcp_server(project_scoped_tools=True).http_app()
     route = next(route for route in app.routes if route.path == "/api/command")
     sessions = AsyncMock()
-    monkeypatch.setattr(PluginHub, "get_sessions", sessions)
+    PluginHub.get_sessions = sessions
+    code = {"action": "execute", "code": "return 42;"}
     for command, params in [
-        ("execute_code", PARAMS),
-        ("batch_execute", {"commands": [{"tool": "execute_code", "params": PARAMS}]}),
-        ("execute_custom_tool", {"tool_name": "execute_code", "parameters": PARAMS}),
+        ("execute_code", code),
+        ("batch_execute", {"commands": [{"tool": "execute_code", "params": code}]}),
+        ("execute_custom_tool", {"tool_name": "execute_code", "parameters": code}),
     ]:
         result = await route.endpoint(SimpleNamespace(json=AsyncMock(return_value={"type": command, "params": params})))
         assert json.loads(result.body)["error"] == "code_execution_session_required"
     sessions.assert_not_called()
+asyncio.run(check())
+"""
+    script = "import sys; sys.path.insert(0, " + repr(str(Path(__file__).parents[1] / "src")) + ")\n" + script
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
