@@ -7,12 +7,14 @@ into the request-scoped state, allowing tools to access it via ctx.get_state("un
 from threading import RLock
 import logging
 import time
+import re
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from core.config import config
 from services.registry import get_registered_tools
 from transport.plugin_hub import PluginHub
+from transport.execution_policy import requires_code_execution
 
 logger = logging.getLogger("mcp-for-unity-server")
 # Separate logger that propagates to root -> stderr so diagnostics show in console
@@ -340,13 +342,20 @@ class UnityInstanceMiddleware(Middleware):
         # We pop the key here so Pydantic's type_adapter.validate_python() never sees it.
         active_instance: str | None = None
         msg_args = getattr(getattr(context, "message", None), "arguments", None)
+        code_request = requires_code_execution(
+            getattr(getattr(context, "message", None), "name", None), msg_args)
         if isinstance(msg_args, dict) and "unity_instance" in msg_args:
             raw = msg_args.pop("unity_instance")
             if raw is not None:
                 raw_str = str(raw).strip()
                 if raw_str:
                     # Raises ValueError with a user-friendly message on invalid input.
-                    active_instance = await self._resolve_instance_value(raw_str, ctx)
+                    if code_request and re.fullmatch(r"[^@]+@[0-9a-fA-F]{16,64}", raw_str):
+                        # A concrete route survives reload. Admission must run
+                        # before any reconnect wait, including for a foreign owner.
+                        active_instance = raw_str
+                    else:
+                        active_instance = await self._resolve_instance_value(raw_str, ctx)
                     logger.debug("Per-call unity_instance resolved to: %s", active_instance)
 
         if not active_instance:
@@ -363,7 +372,7 @@ class UnityInstanceMiddleware(Middleware):
             # Only validate via PluginHub if we are actually using HTTP transport.
             # For stdio transport, skip PluginHub entirely - we only need the instance ID.
             from transport.unity_transport import _is_http_transport
-            if _is_http_transport() and PluginHub.is_configured():
+            if _is_http_transport() and PluginHub.is_configured() and not code_request:
                 try:
                     # resolving session_id might fail if the plugin disconnected
                     # We only need session_id for HTTP transport routing.

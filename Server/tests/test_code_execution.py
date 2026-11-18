@@ -8,8 +8,9 @@ import pytest
 from transport.code_execution import CodeExecutionCoordinator, SlotStore
 
 
-READY = {"success": True, "data": {"advice": {"ready_for_code_execution": True}}}
-BUSY = {"success": True, "data": {"advice": {"ready_for_code_execution": False}}}
+READY = {"success": True, "data": {"compilation": {}, "assets": {}, "execution": {},
+                                   "editor": {"play_mode": {"is_changing": False}}}}
+BUSY = {"success": True, "data": {"compilation": {"is_compile_pending": True}}}
 DONE = {"success": True, "data": {"result": 42}, "execution": {"state": "completed"}}
 PARAMS = {"action": "execute", "code": "return 42;", "execution_id": "first"}
 
@@ -314,3 +315,55 @@ async def test_mcp_context_progress_reaches_client(monkeypatch, coordinator):
     assert result.data == DONE
     assert any("waiting_idle" in message for message in notifications)
     assert any("running" in message for message in notifications)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("section,values", [
+    ("compilation", {"is_compiling": True}),
+    ("compilation", {"is_compile_pending": True}),
+    ("compilation", {"is_domain_reload_pending": True}),
+    ("compilation", {"has_compile_errors": True}),
+    ("assets", {"is_updating": True}),
+    ("editor", {"play_mode": {"is_changing": True}}),
+])
+async def test_raw_editor_snapshot_without_advice_waits_until_clear(coordinator, section, values):
+    probes = 0
+    calls = []
+    async def send(command, params):
+        nonlocal probes
+        calls.append(command)
+        if command == "get_editor_state":
+            probes += 1
+            return {"success": True, "data": {section: values}} if probes == 1 else READY
+        assert probes >= 2
+        return DONE
+    assert await coordinator.run(context(), "unity", "execute_code", PARAMS, send) == DONE
+    assert calls == ["get_editor_state", "get_editor_state", "execute_code"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool,params,is_code", [
+    ("execute_code", PARAMS, True),
+    ("batch_execute", {"commands": [{"tool": "execute_code", "params": PARAMS}]}, True),
+    ("manage_editor", {"action": "stop"}, False),
+    ("execute_code", {"action": "get_execution_status"}, False),
+])
+async def test_only_code_admission_bypasses_middleware_reconnect_wait(monkeypatch, tool, params, is_code):
+    from core.config import config
+    from transport.unity_instance_middleware import UnityInstanceMiddleware
+    from transport.plugin_hub import PluginHub
+    monkeypatch.setattr(config, "transport_mode", "http")
+    monkeypatch.setattr(config, "http_remote_hosted", False)
+    middleware = UnityInstanceMiddleware()
+    middleware.get_active_instance = AsyncMock(return_value="game@1234567890abcdef")
+    monkeypatch.setattr(PluginHub, "is_configured", lambda: True)
+    resolve = AsyncMock(return_value="plugin-session")
+    monkeypatch.setattr(PluginHub, "_resolve_session_id", resolve)
+    ctx = SimpleNamespace(set_state=AsyncMock())
+    await middleware._inject_unity_instance(SimpleNamespace(
+        fastmcp_context=ctx, message=SimpleNamespace(name=tool, arguments=params)))
+    if is_code:
+        resolve.assert_not_called()
+    else:
+        resolve.assert_awaited_once()
+    ctx.set_state.assert_any_await("unity_instance", "game@1234567890abcdef")

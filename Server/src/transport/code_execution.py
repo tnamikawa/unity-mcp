@@ -213,7 +213,10 @@ class CodeExecutionCoordinator:
                 except asyncio.TimeoutError:
                     continue
                 data = state.get("data") or {}
-                advice = data.get("advice") or {}
+                # Unity sends the raw snapshot; advice is a Python resource
+                # enrichment, not part of the Editor's wire response.
+                from services.resources.editor_state import _enrich_advice_and_staleness
+                advice = _enrich_advice_and_staleness(dict(data))["advice"]
                 if state.get("success") and advice.get("ready_for_code_execution") is True:
                     if time.monotonic() >= deadline:
                         continue
