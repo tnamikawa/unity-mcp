@@ -425,3 +425,18 @@ async def test_batch_frontend_reaches_admission_without_code_readiness_preflight
         limit.assert_not_called()
     else:
         limit.assert_awaited_once_with(ctx)
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_retry_control_cleanup_preserves_csharp_return_value(batch):
+    from transport.code_execution import without_retry
+    returned = {"hint": "retry", "retry_after_ms": 123,
+                "nested": [{"recommended_retry_after_ms": 456}]}
+    execution = {"success": True, "hint": "retry", "data": {"result": returned, "retry_after_ms": 500}}
+    value = {"success": True, "hint": "retry", "data": {"results": [
+        {"tool": "execute_code", "result": execution}]}} if batch else execution
+    cleaned = without_retry(value)
+    assert "hint" not in cleaned
+    child = cleaned["data"]["results"][0]["result"] if batch else cleaned
+    assert "hint" not in child and "retry_after_ms" not in child["data"]
+    assert child["data"]["result"] == returned

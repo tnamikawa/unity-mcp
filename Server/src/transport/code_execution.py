@@ -35,12 +35,14 @@ def error(code, execution_id=None, **data):
             "data": {"execution_id": execution_id, **data}}
 
 
-def without_retry(value):
+def without_retry(value, *, _in_data=False):
     if isinstance(value, list):
         return [without_retry(v) for v in value]
     if not isinstance(value, dict):
         return value
-    return {k: without_retry(v) for k, v in value.items()
+    # data.result is the C# program's return value, not transport advice.
+    return {k: (v if _in_data and k == "result" else without_retry(v, _in_data=k == "data"))
+            for k, v in value.items()
             if k not in {"retry_after_ms", "recommended_retry_after_ms"}
             and not (k == "hint" and v == "retry")}
 

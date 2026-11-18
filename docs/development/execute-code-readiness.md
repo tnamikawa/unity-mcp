@@ -36,7 +36,8 @@ closed with `code_execution_session_required` before admission.
 Another session immediately receives `code_execution_slot_occupied`, with the
 occupying execution ID, waiting/running/reconciling phase, and elapsed seconds.
 There is no queue and no automatic resubmission of code after an uncertain send.
-Code responses omit retry hints and retry-after fields.
+MCP control envelopes omit retry hints and retry-after fields. C# return
+values under `data.result` retain their original fields and content.
 
 Workers outlive individual MCP requests. Losing an MCP response or cancelling a
 waiter does not cancel the worker or release its slot. A 5-second ownership
