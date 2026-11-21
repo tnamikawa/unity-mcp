@@ -128,9 +128,14 @@ class SlotStore:
 
 
 class CodeExecutionCoordinator:
-    def __init__(self, store: SlotStore, *, idle_timeout=600., poll_interval=1., progress_interval=12.):
+    def __init__(self, store: SlotStore, *, idle_timeout=600., poll_interval=1., progress_interval=12.,
+                 unresponsive_timeout=30., probe_timeout=5.):
         self.store = store
         self.idle_timeout = idle_timeout
+        # The Editor answers state probes on its main thread. A player build or a modal
+        # dialog blocks that thread; report it instead of waiting the whole idle window.
+        self.unresponsive_timeout = unresponsive_timeout
+        self.probe_timeout = probe_timeout
         self.poll_interval = poll_interval
         self.progress_interval = progress_interval
         self.workers: dict[str, asyncio.Task] = {}
@@ -202,6 +207,7 @@ class CodeExecutionCoordinator:
                 await self._reconcile(slot, send)
                 return
             deadline = time.monotonic() + self.idle_timeout
+            last_answer = time.monotonic()
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -211,9 +217,27 @@ class CodeExecutionCoordinator:
                 # Only the read-only probe has a deadline. No execute task is queued
                 # until the atomic phase transition below, so idle expiry cannot run late.
                 try:
-                    state = await asyncio.wait_for(self._call(send, "get_editor_state", {}), remaining)
+                    state = await asyncio.wait_for(self._call(send, "get_editor_state", {}),
+                                                   min(remaining, self.probe_timeout))
                 except asyncio.TimeoutError:
+                    state = None
+                if state is not None and not state.get("success"):
+                    # Disconnected during a domain reload: an ordinary wait, not a blocked thread.
+                    last_answer = time.monotonic()
+                    await asyncio.sleep(min(self.poll_interval, max(0., deadline - time.monotonic())))
                     continue
+                if state is None:
+                    silent = time.monotonic() - last_answer
+                    if silent >= self.unresponsive_timeout:
+                        self.store.finish(slot, error("editor_unresponsive", slot.execution_id,
+                                                      state="not_started", execution_started=False,
+                                                      unresponsive_seconds=round(silent, 1),
+                                                      hint="Unity's main thread is blocked (player build, "
+                                                           "modal dialog or long import). Nothing was executed."))
+                        return
+                    await asyncio.sleep(min(self.poll_interval, max(0., deadline - time.monotonic())))
+                    continue
+                last_answer = time.monotonic()
                 data = state.get("data") or {}
                 # Unity sends the raw snapshot; advice is a Python resource
                 # enrichment, not part of the Editor's wire response.
@@ -285,6 +309,10 @@ def get_coordinator():
         timeout = float(os.environ.get("UNITY_MCP_CODE_IDLE_TIMEOUT_SECONDS", "600"))
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("UNITY_MCP_CODE_IDLE_TIMEOUT_SECONDS must be positive and finite")
+        unresponsive = float(os.environ.get("UNITY_MCP_CODE_UNRESPONSIVE_SECONDS", "30"))
+        if not math.isfinite(unresponsive) or unresponsive <= 0:
+            raise ValueError("UNITY_MCP_CODE_UNRESPONSIVE_SECONDS must be positive and finite")
         _coordinator = CodeExecutionCoordinator(
-            SlotStore(Path.home() / ".unity-mcp" / "code-execution-slots.sqlite3"), idle_timeout=timeout)
+            SlotStore(Path.home() / ".unity-mcp" / "code-execution-slots.sqlite3"), idle_timeout=timeout,
+            unresponsive_timeout=unresponsive)
     return _coordinator

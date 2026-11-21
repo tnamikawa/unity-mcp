@@ -440,3 +440,45 @@ def test_retry_control_cleanup_preserves_csharp_return_value(batch):
     child = cleaned["data"]["results"][0]["result"] if batch else cleaned
     assert "hint" not in child and "retry_after_ms" not in child["data"]
     assert child["data"]["result"] == returned
+
+
+@pytest.mark.asyncio
+async def test_blocked_main_thread_reports_unresponsive_without_executing(tmp_path):
+    # A player build blocks Unity's main thread: state probes never answer.
+    coordinator = CodeExecutionCoordinator(SlotStore(tmp_path / "slots.sqlite3"), idle_timeout=5.,
+                                           poll_interval=.002, progress_interval=.01,
+                                           unresponsive_timeout=.05, probe_timeout=.01)
+    executions = []
+
+    async def send(command, params):
+        if command == "get_editor_state":
+            await asyncio.sleep(10)
+        executions.append(params)
+        return DONE
+
+    started = time.monotonic()
+    result = await asyncio.wait_for(coordinator.run(context(), "unity", "execute_code", PARAMS, send), 2)
+    assert time.monotonic() - started < 1
+    assert result["error"] == "editor_unresponsive"
+    assert result["data"]["execution_started"] is False
+    assert executions == []
+
+
+@pytest.mark.asyncio
+async def test_disconnected_reload_keeps_waiting_until_ready(tmp_path):
+    # A domain reload disconnects briefly; that is not an unresponsive main thread.
+    coordinator = CodeExecutionCoordinator(SlotStore(tmp_path / "slots.sqlite3"), idle_timeout=5.,
+                                           poll_interval=.002, progress_interval=.01,
+                                           unresponsive_timeout=.02, probe_timeout=.01)
+    probes = []
+
+    async def send(command, params):
+        if command == "get_editor_state":
+            probes.append(1)
+            if len(probes) < 40:
+                raise ConnectionError("reloading")
+            return READY
+        return DONE
+
+    result = await asyncio.wait_for(coordinator.run(context(), "unity", "execute_code", PARAMS, send), 2)
+    assert result == DONE
