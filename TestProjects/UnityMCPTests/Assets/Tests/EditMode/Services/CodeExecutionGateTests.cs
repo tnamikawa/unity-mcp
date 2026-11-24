@@ -35,6 +35,40 @@ namespace MCPForUnityTests.Editor.Services
         }
 
         [Test]
+        public void CompilationWithoutEditorAssemblyChangesDoesNotWaitForReload()
+        {
+            // An up-to-date compilation request or a player build compiles no Editor assembly,
+            // so no domain reload follows. The gate must not stay pending forever (2026-11-24).
+            var gate = new CodeExecutionGate();
+            gate.CompilationRequested();
+            gate.CompilationStarted();
+            gate.CompilationFinished(false, editorAssembliesChanged: false);
+            Assert.IsFalse(gate.CompilationPending);
+            Assert.IsTrue(gate.TryBegin(false, false, false, out var execution, out _));
+            execution.Dispose();
+        }
+
+        [Test]
+        public void FailedCompilationWithoutEditorAssembliesStillReportsFailure()
+        {
+            var gate = new CodeExecutionGate();
+            gate.CompilationStarted();
+            gate.CompilationFinished(true, editorAssembliesChanged: false);
+            AssertBlocked(gate, "compilation_failed");
+        }
+
+        [TestCase("Library/ScriptAssemblies/Assembly-CSharp.dll", true)]
+        [TestCase("C:/Project/Library/ScriptAssemblies/Assembly-CSharp-Editor.dll", true)]
+        [TestCase("C:\\Project\\Library\\ScriptAssemblies\\Unity.Foo.dll", true)]
+        [TestCase("Library/PlayerScriptAssemblies/Assembly-CSharp.dll", false)]
+        [TestCase("Library/Bee/artifacts/SwitchPlayerBuildProgram/ManagedStripped/Assembly-CSharp.dll", false)]
+        [TestCase("", false)]
+        public void OnlyEditorScriptAssembliesExpectAReload(string path, bool expected)
+        {
+            Assert.AreEqual(expected, EditorExecutionGuard.IsEditorAssembly(path));
+        }
+
+        [Test]
         public void OldReloadCannotReleaseNewCompilationRequest()
         {
             var gate = new CodeExecutionGate();

@@ -54,12 +54,14 @@ namespace MCPForUnity.Editor.Services
             }
         }
 
-        internal void CompilationFinished(bool failed)
+        internal void CompilationFinished(bool failed, bool editorAssembliesChanged = true)
         {
             lock (_lock)
             {
-                // Successful compilation still has to swap assemblies. A failed one will not reload.
-                _compilationPending = !failed;
+                // Successful compilation still has to swap assemblies. A failed one will not reload,
+                // and neither will one that rebuilt no Editor assembly (an up-to-date request, or the
+                // player-script compilation of a build). Waiting for a reload there never ends.
+                _compilationPending = !failed && editorAssembliesChanged;
                 _compilationFailed = failed;
             }
         }

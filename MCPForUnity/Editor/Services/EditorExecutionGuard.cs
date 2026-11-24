@@ -21,6 +21,7 @@ namespace MCPForUnity.Editor.Services
         // can request another compilation. That newer request must keep its own gate.
         private static readonly int LoadedGeneration = Gate.Generation;
         private static bool _compileHadErrors;
+        private static int _editorAssembliesCompiled;
         private static bool _changingPlayMode;
 
         internal static bool CompilationPending => Gate.CompilationPending;
@@ -33,14 +34,19 @@ namespace MCPForUnity.Editor.Services
             CompilationPipeline.compilationStarted += _ =>
             {
                 _compileHadErrors = false;
+                _editorAssembliesCompiled = 0;
                 Gate.CompilationStarted();
                 SaveCompilationState();
             };
-            CompilationPipeline.assemblyCompilationFinished += (_, messages) =>
+            CompilationPipeline.assemblyCompilationFinished += (path, messages) =>
+            {
                 _compileHadErrors |= messages.Any(m => m.type == CompilerMessageType.Error);
+                if (IsEditorAssembly(path)) _editorAssembliesCompiled++;
+            };
             CompilationPipeline.compilationFinished += _ =>
             {
-                Gate.CompilationFinished(_compileHadErrors);
+                // Only a rebuilt Editor assembly is followed by a domain reload.
+                Gate.CompilationFinished(_compileHadErrors, _editorAssembliesCompiled > 0);
                 SaveCompilationState();
             };
             AssemblyReloadEvents.beforeAssemblyReload += () =>
@@ -58,6 +64,17 @@ namespace MCPForUnity.Editor.Services
             EditorApplication.playModeStateChanged += state =>
                 _changingPlayMode = state == PlayModeStateChange.ExitingEditMode
                     || state == PlayModeStateChange.ExitingPlayMode;
+        }
+
+        // Editor assemblies are written to Library/ScriptAssemblies. Player builds compile into
+        // other folders (PlayerScriptAssemblies, Bee artifacts) and never reload the Editor domain.
+        internal static bool IsEditorAssembly(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            string normalized = path.Replace('\\', '/');
+            return normalized.IndexOf("/PlayerScriptAssemblies/", StringComparison.OrdinalIgnoreCase) < 0 &&
+                (normalized.StartsWith("Library/ScriptAssemblies/", StringComparison.OrdinalIgnoreCase) ||
+                 normalized.IndexOf("/Library/ScriptAssemblies/", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         internal static void RequestScriptCompilation()
