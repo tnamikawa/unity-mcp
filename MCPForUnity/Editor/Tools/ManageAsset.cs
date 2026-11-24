@@ -684,8 +684,10 @@ namespace MCPForUnity.Editor.Tools
                     string.Join(" ", searchFilters),
                     folderScope
                 );
-                List<object> results = new List<object>();
-                int totalFound = 0;
+                // Match on paths only. Asset data is built for the requested page alone:
+                // building it loads the asset, and loading every match (all textures, meshes
+                // or audio in a project) held their payloads in memory.
+                List<string> matches = new List<string>();
 
                 foreach (string guid in guids)
                 {
@@ -705,13 +707,13 @@ namespace MCPForUnity.Editor.Tools
                         }
                     }
 
-                    totalFound++; // Count matching assets before pagination
-                    results.Add(GetAssetData(assetPath, generatePreview));
+                    matches.Add(assetPath);
                 }
 
-                // Apply pagination
-                int startIndex = (pageNumber - 1) * pageSize;
-                var pagedResults = results.Skip(startIndex).Take(pageSize).ToList();
+                int totalFound = matches.Count;
+                int startIndex = Math.Max(0, (pageNumber - 1) * pageSize);
+                var pagedResults = matches.Skip(startIndex).Take(Math.Max(0, pageSize))
+                    .Select(assetPath => GetAssetData(assetPath, generatePreview)).ToList();
 
                 return new SuccessResponse(
                     $"Found {totalFound} asset(s). Returning page {pageNumber} ({pagedResults.Count} assets).",

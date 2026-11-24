@@ -215,10 +215,18 @@ namespace MCPForUnity.Editor.Helpers
 
                 RenderTexture.active = rt;
                 var texture = new Texture2D(width, height, TextureFormat.RGBA32, false);
-                texture.ReadPixels(new Rect(0, 0, width, height), 0, 0);
-                texture.Apply();
-                FlipTextureVertically(texture);
-                return texture;
+                try
+                {
+                    texture.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+                    texture.Apply();
+                    FlipTextureVertically(texture);
+                    return texture;
+                }
+                catch
+                {
+                    UnityEngine.Object.DestroyImmediate(texture);
+                    throw;
+                }
             }
             catch (TargetInvocationException ex)
             {

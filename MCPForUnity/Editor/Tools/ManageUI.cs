@@ -28,6 +28,16 @@ namespace MCPForUnity.Editor.Tools
         {
             EditorApplication.quitting += CleanupRenderTextures;
             AssemblyReloadEvents.beforeAssemblyReload += CleanupRenderTextures;
+            // Without a domain reload on play mode exit, a capture queued during play never
+            // completes and would otherwise keep its texture and block later captures.
+            EditorApplication.playModeStateChanged += state =>
+            {
+                if (state != PlayModeStateChange.EnteredEditMode) return;
+                if (s_pendingCaptureTex != null) UnityEngine.Object.DestroyImmediate(s_pendingCaptureTex);
+                s_pendingCaptureTex = null;
+                s_pendingCaptureDone = false;
+                s_pendingCaptureStarted = false;
+            };
         }
 
         private static void CleanupRenderTextures()
@@ -43,6 +53,11 @@ namespace MCPForUnity.Editor.Tools
                     UnityEngine.Object.DestroyImmediate(kvp.Value);
             }
             s_panelRTs.Clear();
+            // A queued play-mode capture that was never retrieved holds a full-screen texture.
+            if (s_pendingCaptureTex != null) UnityEngine.Object.DestroyImmediate(s_pendingCaptureTex);
+            s_pendingCaptureTex = null;
+            s_pendingCaptureDone = false;
+            s_pendingCaptureStarted = false;
         }
 
         public static object HandleCommand(JObject @params)
@@ -1076,101 +1091,108 @@ namespace MCPForUnity.Editor.Tools
                     Canvas.ForceUpdateCanvases();
                 }
 
-                // Read pixels from the RT
-                RenderTexture prevActive = RenderTexture.active;
-                RenderTexture.active = rt;
-                var tex = new Texture2D(width, height, TextureFormat.RGBA32, false);
-                tex.ReadPixels(new Rect(0, 0, width, height), 0, 0);
-                tex.Apply();
-                RenderTexture.active = prevActive;
-
-                // Restore targetTexture to null so the UI renders back to the
-                // actual display / camera.  The RT stays cached in s_panelRTs
-                // and will be re-attached on the next render_ui call.
-                if (!rtJustAssigned)
+                Texture2D tex = null;
+                try
                 {
-                    panelSettings.targetTexture = null;
-                    EditorUtility.SetDirty(panelSettings);
-                }
+                    // Read pixels from the RT
+                    RenderTexture prevActive = RenderTexture.active;
+                    RenderTexture.active = rt;
+                    tex = new Texture2D(width, height, TextureFormat.RGBA32, false);
+                    tex.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+                    tex.Apply();
+                    RenderTexture.active = prevActive;
 
-                // Check if any content was rendered
-                bool hasContent = false;
-                var pixels = tex.GetPixels32();
-                for (int i = 0; i < pixels.Length; i += Mathf.Max(1, pixels.Length / 100))
-                {
-                    if (pixels[i].a > 0) { hasContent = true; break; }
-                }
-
-                // Save to Screenshots folder
-                string resolvedName = string.IsNullOrWhiteSpace(fileName)
-                    ? $"ui-render-{DateTime.Now:yyyyMMdd-HHmmss}.png"
-                    : fileName.Trim();
-                if (!resolvedName.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
-                    resolvedName += ".png";
-
-                Directory.CreateDirectory(resolvedFolderAbs);
-                string fullPath = Path.Combine(resolvedFolderAbs, resolvedName).Replace('\\', '/');
-                fullPath = EnsureUniqueFilePath(fullPath);
-
-                byte[] png = tex.EncodeToPNG();
-                File.WriteAllBytes(fullPath, png);
-
-                string projectRelPath = ScreenshotUtility.ToProjectRelativePath(fullPath);
-                if (ScreenshotUtility.IsUnderAssets(projectRelPath))
-                    AssetDatabase.ImportAsset(projectRelPath, ImportAssetOptions.ForceSynchronousImport);
-
-                var data = new Dictionary<string, object>
-                {
-                    { "path", projectRelPath },
-                    { "fullPath", fullPath },
-                    { "width", width },
-                    { "height", height },
-                    { "hasContent", hasContent },
-                };
-
-                if (rtJustAssigned)
-                    data["note"] = "RenderTexture was just assigned to PanelSettings. Call render_ui again to capture the rendered UI.";
-
-                if (!string.IsNullOrEmpty(target))
-                    data["gameObject"] = target;
-                if (!string.IsNullOrEmpty(uxmlPath))
-                    data["sourceAsset"] = uxmlPath;
-
-                if (includeImage)
-                {
-                    int targetMax = maxResolution > 0 ? maxResolution : 640;
-                    Texture2D downscaled = null;
-                    try
+                    // Restore targetTexture to null so the UI renders back to the
+                    // actual display / camera.  The RT stays cached in s_panelRTs
+                    // and will be re-attached on the next render_ui call.
+                    if (!rtJustAssigned)
                     {
-                        if (width > targetMax || height > targetMax)
+                        panelSettings.targetTexture = null;
+                        EditorUtility.SetDirty(panelSettings);
+                    }
+
+                    // Check if any content was rendered
+                    bool hasContent = false;
+                    var pixels = tex.GetPixels32();
+                    for (int i = 0; i < pixels.Length; i += Mathf.Max(1, pixels.Length / 100))
+                    {
+                        if (pixels[i].a > 0) { hasContent = true; break; }
+                    }
+
+                    // Save to Screenshots folder
+                    string resolvedName = string.IsNullOrWhiteSpace(fileName)
+                        ? $"ui-render-{DateTime.Now:yyyyMMdd-HHmmss}.png"
+                        : fileName.Trim();
+                    if (!resolvedName.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+                        resolvedName += ".png";
+
+                    Directory.CreateDirectory(resolvedFolderAbs);
+                    string fullPath = Path.Combine(resolvedFolderAbs, resolvedName).Replace('\\', '/');
+                    fullPath = EnsureUniqueFilePath(fullPath);
+
+                    byte[] png = tex.EncodeToPNG();
+                    File.WriteAllBytes(fullPath, png);
+
+                    string projectRelPath = ScreenshotUtility.ToProjectRelativePath(fullPath);
+                    if (ScreenshotUtility.IsUnderAssets(projectRelPath))
+                        AssetDatabase.ImportAsset(projectRelPath, ImportAssetOptions.ForceSynchronousImport);
+
+                    var data = new Dictionary<string, object>
+                    {
+                        { "path", projectRelPath },
+                        { "fullPath", fullPath },
+                        { "width", width },
+                        { "height", height },
+                        { "hasContent", hasContent },
+                    };
+
+                    if (rtJustAssigned)
+                        data["note"] = "RenderTexture was just assigned to PanelSettings. Call render_ui again to capture the rendered UI.";
+
+                    if (!string.IsNullOrEmpty(target))
+                        data["gameObject"] = target;
+                    if (!string.IsNullOrEmpty(uxmlPath))
+                        data["sourceAsset"] = uxmlPath;
+
+                    if (includeImage)
+                    {
+                        int targetMax = maxResolution > 0 ? maxResolution : 640;
+                        Texture2D downscaled = null;
+                        try
                         {
-                            downscaled = ScreenshotUtility.DownscaleTexture(tex, targetMax);
-                            data["imageBase64"] = Convert.ToBase64String(downscaled.EncodeToPNG());
-                            data["imageWidth"] = downscaled.width;
-                            data["imageHeight"] = downscaled.height;
+                            if (width > targetMax || height > targetMax)
+                            {
+                                downscaled = ScreenshotUtility.DownscaleTexture(tex, targetMax);
+                                data["imageBase64"] = Convert.ToBase64String(downscaled.EncodeToPNG());
+                                data["imageWidth"] = downscaled.width;
+                                data["imageHeight"] = downscaled.height;
+                            }
+                            else
+                            {
+                                data["imageBase64"] = Convert.ToBase64String(png);
+                                data["imageWidth"] = width;
+                                data["imageHeight"] = height;
+                            }
                         }
-                        else
+                        finally
                         {
-                            data["imageBase64"] = Convert.ToBase64String(png);
-                            data["imageWidth"] = width;
-                            data["imageHeight"] = height;
+                            if (downscaled != null) UnityEngine.Object.DestroyImmediate(downscaled);
                         }
                     }
-                    finally
-                    {
-                        if (downscaled != null) UnityEngine.Object.DestroyImmediate(downscaled);
-                    }
+
+                    string msg = hasContent
+                        ? $"UI rendered to '{projectRelPath}'."
+                        : rtJustAssigned
+                            ? $"RenderTexture assigned to PanelSettings. Call render_ui again to capture the rendered content."
+                            : $"UI render saved to '{projectRelPath}' (no visible content detected).";
+
+                    return new SuccessResponse(msg, data);
                 }
-
-                UnityEngine.Object.DestroyImmediate(tex);
-
-                string msg = hasContent
-                    ? $"UI rendered to '{projectRelPath}'."
-                    : rtJustAssigned
-                        ? $"RenderTexture assigned to PanelSettings. Call render_ui again to capture the rendered content."
-                        : $"UI render saved to '{projectRelPath}' (no visible content detected).";
-
-                return new SuccessResponse(msg, data);
+                finally
+                {
+                    // Also on a failure part-way (encode, write, import), the readback texture is released.
+                    if (tex != null) UnityEngine.Object.DestroyImmediate(tex);
+                }
             }
             finally
             {

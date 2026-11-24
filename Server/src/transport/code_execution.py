@@ -42,6 +42,7 @@ ATTEMPT_EPOCH = 1767225600
 UNCERTAIN_ERRORS = {"execution_result_unknown", "code_transport_unavailable", "unity_session_unavailable",
                     "unity_connection_unavailable", "execution_in_progress"}
 LIVE_STATES = {"running", "queued", "unknown"}
+RESULT_RETENTION_SECONDS = 7 * 24 * 3600
 
 
 def response(value):
@@ -124,6 +125,10 @@ class SlotStore:
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS active_code_slot "
                        "ON code_slots(instance) WHERE result IS NULL")
             db.execute("CREATE INDEX IF NOT EXISTS code_slot_execution ON code_slots(instance, execution_id)")
+            # Results (up to 256 Ki-characters each) were kept forever. Replay protection only
+            # needs to outlive a client's retries and an Editor restart.
+            db.execute("DELETE FROM code_slots WHERE result IS NOT NULL AND created < ?",
+                       (time.time() - RESULT_RETENTION_SECONDS,))
 
     def connect(self):
         return sqlite3.connect(str(self.path), timeout=2)

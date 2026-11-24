@@ -175,7 +175,7 @@ namespace MCPForUnity.Runtime.Helpers
             Texture2D result = null;
             bool done = false;
             bool callerReturned = false;
-            ScreenshotCapturer.Begin(superSize, tex =>
+            var capturer = ScreenshotCapturer.Begin(superSize, tex =>
             {
                 // Late completion after the spin loop timed out: caller will never consume
                 // the texture, so destroy it here to avoid leaking a Unity object.
@@ -203,6 +203,9 @@ namespace MCPForUnity.Runtime.Helpers
                     UnityEditor.EditorApplication.isPaused = false;
             }
             callerReturned = true;
+            // Timed out: a HideAndDontSave capturer whose frame never came would outlive
+            // play mode (its Start never runs in edit mode). Remove it with its callback.
+            if (!done && capturer != null) UnityEngine.Object.DestroyImmediate(capturer.gameObject);
             return result;
         }
 #endif
@@ -597,9 +600,17 @@ namespace MCPForUnity.Runtime.Helpers
                 Graphics.Blit(source, rt);
                 RenderTexture.active = rt;
                 var dst = new Texture2D(dstW, dstH, TextureFormat.RGBA32, false, linear: !srcIsSrgb);
-                dst.ReadPixels(new Rect(0, 0, dstW, dstH), 0, 0);
-                dst.Apply();
-                return dst;
+                try
+                {
+                    dst.ReadPixels(new Rect(0, 0, dstW, dstH), 0, 0);
+                    dst.Apply();
+                    return dst;
+                }
+                catch
+                {
+                    DestroyTexture(dst);
+                    throw;
+                }
             }
             finally
             {
@@ -771,12 +782,13 @@ namespace MCPForUnity.Runtime.Helpers
         private Action<Texture2D> _onComplete;
 
         /// <summary>Spawns a hidden GameObject, attaches a capturer, returns immediately.</summary>
-        public static void Begin(int superSize, Action<Texture2D> onComplete)
+        public static ScreenshotCapturer Begin(int superSize, Action<Texture2D> onComplete)
         {
             var go = new GameObject("__MCP_ScreenshotCapturer__") { hideFlags = HideFlags.HideAndDontSave };
             var c = go.AddComponent<ScreenshotCapturer>();
             c._superSize = Mathf.Max(1, superSize);
             c._onComplete = onComplete;
+            return c;
         }
 
         private System.Collections.IEnumerator Start()
