@@ -93,8 +93,7 @@ namespace MCPForUnity.Editor.Tools
             switch (action)
             {
                 case "get_execution_status":
-                    return JObject.Parse(Services.Transport.TransportCommandDispatcher.GetExecutionStatus(
-                        @params.Value<string>("execution_id")))["result"];
+                    return JObject.Parse(Services.Transport.TransportCommandDispatcher.GetExecutionStatus(@params))["result"];
                 case ActionExecute:
                     return HandleExecute(@params);
                 case ActionGetHistory:

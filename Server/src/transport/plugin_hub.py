@@ -990,7 +990,9 @@ class PluginHub(WebSocketEndpoint):
             raise InstanceSelectionRequiredError()
 
         if session_id is None:
-            logger.warning(
+            # Callers that hold their own wait (the code worker) ask without one; their
+            # one-per-poll answers during a reload are expected, not a failure.
+            (logger.warning if max_wait_s > 0 else logger.debug)(
                 "No Unity plugin reconnected within %.2fs (instance=%s)",
                 max_wait_s,
                 unity_instance or "default",

@@ -32,12 +32,14 @@ namespace MCPForUnity.Editor.Services.Transport
                 string commandJson,
                 TaskCompletionSource<string> completionSource,
                 CancellationToken cancellationToken,
-                string executionId)
+                string executionId,
+                int attempt)
             {
                 CommandJson = commandJson;
                 CompletionSource = completionSource;
                 CancellationToken = cancellationToken;
                 ExecutionId = executionId;
+                Attempt = attempt;
                 ResponseSource = executionId == null ? completionSource
                     : new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
                 QueuedAt = DateTime.UtcNow;
@@ -47,6 +49,7 @@ namespace MCPForUnity.Editor.Services.Transport
             public TaskCompletionSource<string> CompletionSource { get; }
             public TaskCompletionSource<string> ResponseSource { get; }
             public string ExecutionId { get; }
+            public int Attempt { get; }
             public CancellationToken CancellationToken { get; }
             public CancellationTokenRegistration CancellationRegistration { get; set; }
             public bool IsExecuting { get; set; }
@@ -79,9 +82,14 @@ namespace MCPForUnity.Editor.Services.Transport
             _mainThreadContext = SynchronizationContext.Current;
             _mainThreadId = Thread.CurrentThread.ManagedThreadId;
             using (var process = System.Diagnostics.Process.GetCurrentProcess())
-                Ledger = new CommandExecutionLedger(
-                    Path.GetFullPath(Path.Combine(UnityEngine.Application.dataPath, "../Library/MCPForUnity/command-executions.json")),
-                    process.Id + ":" + process.StartTime.ToUniversalTime().Ticks);
+            {
+                var started = process.StartTime.ToUniversalTime();
+                Ledger = new CommandExecutionLedger(new SessionStateJournalStore(),
+                    process.Id + ":" + started.Ticks, new DateTimeOffset(started).ToUnixTimeMilliseconds());
+            }
+            DeleteLegacyJournal();
+            // The last main-thread moment of this domain: persist completions recorded off-thread.
+            AssemblyReloadEvents.beforeAssemblyReload += () => Ledger.Flush();
 
             EnsureInitialised();
 
@@ -107,20 +115,27 @@ namespace MCPForUnity.Editor.Services.Transport
             EnsureInitialised();
 
             string executionId = null;
+            int attempt = 0;
             if (TryGetExecutionRequest(commandJson, out var type, out var parameters))
             {
                 if (type == "execute_code" && parameters.Value<string>("action") == "get_execution_status")
-                    return Task.FromResult(Ledger.Status(parameters.Value<string>("execution_id"), parameters.Value<bool>("settle_unstarted")));
+                    return Task.FromResult(GetExecutionStatus(parameters));
                 if (cancellationToken.IsCancellationRequested)
                     return Task.FromResult(SerializeError("Request cancelled before admission"));
-                var rejection = Ledger.Admit(type, parameters, out executionId, EditorExecutionGuard.CompilationPending);
+                var rejection = Ledger.Admit(type, parameters, out executionId, out attempt, EditorExecutionGuard.CompilationPending);
                 if (rejection != null) return Task.FromResult(rejection);
+            }
+            else if (type == "get_editor_state" && EditorExecutionGuard.IsBuildingPlayer)
+            {
+                // A player build holds the main thread; answer from this thread so callers
+                // see a known transition instead of an unresponsive Editor.
+                return Task.FromResult(EditorExecutionGuard.BuildingPlayerState());
             }
 
             var id = Guid.NewGuid().ToString("N");
             var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            var pending = new PendingCommand(commandJson, tcs, cancellationToken, executionId);
+            var pending = new PendingCommand(commandJson, tcs, cancellationToken, executionId, attempt);
 
             lock (PendingLock)
             {
@@ -135,7 +150,7 @@ namespace MCPForUnity.Editor.Services.Transport
                     : SerializeError(task.Exception?.GetBaseException().Message ?? "Handler cancelled");
                 try
                 {
-                    response = Ledger.Complete(executionId, response);
+                    response = Ledger.Complete(executionId, attempt, response);
                     pending.ResponseSource.TrySetResult(response);
                 }
                 catch (Exception ex) { pending.ResponseSource.TrySetResult(SerializeError(ex.Message)); }
@@ -153,7 +168,23 @@ namespace MCPForUnity.Editor.Services.Transport
             return pending.ResponseSource.Task;
         }
 
-        internal static string GetExecutionStatus(string executionId = null) => Ledger.Status(executionId);
+        internal static string GetExecutionStatus(JObject parameters)
+        {
+            var settleAttempt = parameters?["settle_attempt"];
+            var admittedAt = parameters?["admitted_at_unix_ms"];
+            return Ledger.Status(parameters?.Value<string>("execution_id"), parameters?.Value<bool?>("settle_unstarted") ?? false,
+                settleAttempt == null || settleAttempt.Type == JTokenType.Null ? null : settleAttempt.Value<int>(),
+                admittedAt == null || admittedAt.Type == JTokenType.Null ? null : admittedAt.Value<long>());
+        }
+
+        private static void DeleteLegacyJournal()
+        {
+            // Superseded by SessionState; the file journal could not survive Windows sharing
+            // violations during reloads. Its entries no longer describe this process.
+            string legacy = Path.GetFullPath(Path.Combine(UnityEngine.Application.dataPath, "../Library/MCPForUnity/command-executions.json"));
+            foreach (var file in new[] { legacy, legacy + ".pending" })
+                try { if (File.Exists(file)) File.Delete(file); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
 
         internal static bool TryGetExecutionRequest(string commandJson, out string type, out JObject parameters)
         {
@@ -281,6 +312,8 @@ namespace MCPForUnity.Editor.Services.Transport
 
             try
             {
+            if (Ledger.IsDirty) Ledger.Flush();
+
             List<(string id, PendingCommand pending)> ready;
 
             lock (PendingLock)
@@ -348,9 +381,9 @@ namespace MCPForUnity.Editor.Services.Transport
                     return;
                 }
             }
-            if (pending.ExecutionId != null && !Ledger.Start(pending.ExecutionId))
+            if (pending.ExecutionId != null && !Ledger.Start(pending.ExecutionId, pending.Attempt))
             {
-                pending.TrySetResult(Ledger.CancelWait(pending.ExecutionId));
+                pending.TrySetResult(Ledger.CancelWait(pending.ExecutionId, pending.Attempt));
                 return;
             }
 
@@ -521,7 +554,7 @@ namespace MCPForUnity.Editor.Services.Transport
                 return;
             }
             if (pending == null || pending.CompletionSource.Task.IsCompleted || pending.ResponseSource.Task.IsCompleted) return;
-            string response = Ledger.CancelWait(pending.ExecutionId);
+            string response = Ledger.CancelWait(pending.ExecutionId, pending.Attempt);
             pending.ResponseSource.TrySetResult(response);
             if (!pending.IsExecuting) pending.TrySetResult(response);
         }

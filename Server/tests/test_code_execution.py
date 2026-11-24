@@ -137,7 +137,7 @@ async def test_idle_timeout_never_sends_even_after_late_probe(coordinator):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["completed", "not_started", "running", "unknown", "interrupted"])
-async def test_disconnect_reconciles_ledger_without_resending(coordinator, state):
+async def test_disconnect_reconciles_ledger_and_resends_only_unstarted(coordinator, state):
     calls = []
     probes = 0
 
@@ -154,13 +154,18 @@ async def test_disconnect_reconciles_ledger_without_resending(coordinator, state
                                           "response": {"status": "success", "result": DONE}}}
 
     result = await coordinator.run(context(), "unity", "execute_code", PARAMS, send)
-    if state in {"not_started", "interrupted"}:
+    if state == "interrupted":
         assert result["data"]["state"] == state
     else:
         assert result == DONE
-    assert sum(p.get("action") == "execute" for _, p in calls) == 1
-    assert all(p.get("settle_unstarted") for c, p in calls if p.get("action") == "get_execution_status")
-    assert probes == (2 if state in {"running", "unknown"} else 1)
+    sends = [p for _, p in calls if p.get("action") == "execute"]
+    # Only an attempt Unity proved unstarted is sent again, as a later attempt.
+    assert len(sends) == (2 if state == "not_started" else 1)
+    assert sends[-1]["attempt"] > sends[0]["attempt"] or len(sends) == 1
+    statuses = [p for _, p in calls if p.get("action") == "get_execution_status"]
+    assert all(p["settle_unstarted"] for p in statuses)
+    assert statuses[0]["settle_attempt"] == sends[0]["attempt"]
+    assert probes == (2 if state in {"running", "unknown", "not_started"} else 1)
 
 
 @pytest.mark.asyncio
@@ -205,7 +210,8 @@ async def test_abandoned_slot_is_reconciled_and_never_dispatched(coordinator):
     result = await coordinator.run(context(), "unity", "execute_code", PARAMS, send)
     assert result["error"] == "execution_not_started"
     assert calls == [("execute_code", {"action": "get_execution_status", "execution_id": "original",
-                                       "settle_unstarted": True})]
+                                       "settle_unstarted": True,
+                                       "admitted_at_unix_ms": int(slot.created * 1000)})]
 
 
 @pytest.mark.asyncio
@@ -482,3 +488,128 @@ async def test_disconnected_reload_keeps_waiting_until_ready(tmp_path):
 
     result = await asyncio.wait_for(coordinator.run(context(), "unity", "execute_code", PARAMS, send), 2)
     assert result == DONE
+
+
+@pytest.mark.asyncio
+async def test_reconcile_without_definitive_state_releases_slot(tmp_path):
+    # An Editor that answers without an execution state (old plugin journal error, or
+    # disconnected for good) must not hold the shared slot forever.
+    coordinator = CodeExecutionCoordinator(SlotStore(tmp_path / "slots.sqlite3"), idle_timeout=5.,
+                                           poll_interval=.002, progress_interval=.01, reconcile_timeout=.05)
+
+    async def send(command, params):
+        if command == "get_editor_state":
+            return READY
+        if params["action"] == "execute":
+            return {"success": False, "error": "execution_storage_error",
+                    "data": {"execution_id": "first", "state": "queued"}}
+        return {"success": False, "error": "execution_storage_error"}
+
+    result = await asyncio.wait_for(coordinator.run(context(), "unity", "execute_code", PARAMS, send), 2)
+    assert result["error"] == "execution_result_unknown"
+    assert result["data"]["last_error"] == "execution_storage_error"
+    assert coordinator.store.admit("unity", "B", "next")[1]
+
+
+@pytest.mark.asyncio
+async def test_live_execution_is_not_expired_by_reconcile_timeout(tmp_path):
+    coordinator = CodeExecutionCoordinator(SlotStore(tmp_path / "slots.sqlite3"), idle_timeout=5.,
+                                           poll_interval=.002, progress_interval=.01, reconcile_timeout=.02)
+    polls = []
+
+    async def send(command, params):
+        if command == "get_editor_state":
+            return READY
+        if params["action"] == "execute":
+            raise ConnectionError("reload")
+        polls.append(1)
+        await asyncio.sleep(.001)
+        state = "running" if len(polls) < 60 else "completed"
+        return {"success": True, "data": {"execution": {"state": state},
+                                          "response": {"status": "success", "result": DONE}}}
+
+    assert await asyncio.wait_for(coordinator.run(context(), "unity", "execute_code", PARAMS, send), 2) == DONE
+    assert len(polls) == 60
+
+
+@pytest.mark.asyncio
+async def test_execution_lost_by_editor_restart_is_reported(coordinator):
+    async def send(command, params):
+        if command == "get_editor_state":
+            return READY
+        if params["action"] == "execute":
+            raise ConnectionError("editor exited")
+        return {"success": True, "data": {"execution": {"state": "lost"}}}
+
+    result = await coordinator.run(context(), "unity", "execute_code", PARAMS, send)
+    assert result["error"] == "execution_lost"
+    assert result["data"]["execution_started"] is None
+
+
+@pytest.mark.asyncio
+async def test_repeated_execution_id_returns_stored_result_without_sending(coordinator):
+    calls = []
+
+    async def send(command, params):
+        calls.append(command)
+        return READY if command == "get_editor_state" else DONE
+
+    assert await coordinator.run(context(), "unity", "execute_code", PARAMS, send) == DONE
+    sent = calls.count("execute_code")
+    assert await coordinator.run(context("B"), "unity", "execute_code", PARAMS, send) == DONE
+    assert calls.count("execute_code") == sent
+    conflict = await coordinator.run(context(), "unity", "execute_code", {**PARAMS, "code": "return 1;"}, send)
+    assert conflict["error"] == "execution_id_conflict"
+    assert calls.count("execute_code") == sent
+
+
+@pytest.mark.asyncio
+async def test_repeated_execution_id_after_unstarted_result_runs(coordinator):
+    coordinator.idle_timeout = .05
+    ready = False
+    sends = []
+
+    async def send(command, params):
+        if command == "get_editor_state":
+            return READY if ready else BUSY
+        sends.append(params["attempt"])
+        return DONE
+
+    assert (await coordinator.run(context(), "unity", "execute_code", PARAMS, send))["error"] == "code_idle_wait_timeout"
+    ready = True
+    coordinator.idle_timeout = 5
+    assert await coordinator.run(context(), "unity", "execute_code", PARAMS, send) == DONE
+    assert len(sends) == 1
+
+
+@pytest.mark.asyncio
+async def test_player_build_answer_waits_as_a_transition(tmp_path):
+    coordinator = CodeExecutionCoordinator(SlotStore(tmp_path / "slots.sqlite3"), idle_timeout=5.,
+                                           poll_interval=.002, progress_interval=.01,
+                                           unresponsive_timeout=.02, probe_timeout=.5)
+    probes = []
+
+    async def send(command, params):
+        if command == "get_editor_state":
+            probes.append(1)
+            if len(probes) < 60:
+                return {"success": True, "data": {"observed_at_unix_ms": int(time.time() * 1000),
+                                                  "build": {"is_building_player": True},
+                                                  "execution": {"is_running": False}}}
+            return READY
+        return DONE
+
+    assert await asyncio.wait_for(coordinator.run(context(), "unity", "execute_code", PARAMS, send), 2) == DONE
+    assert len(probes) == 60
+
+
+def test_existing_store_without_fingerprint_column_is_migrated(tmp_path):
+    import sqlite3
+    path = tmp_path / "slots.sqlite3"
+    with sqlite3.connect(str(path)) as db:
+        db.execute("CREATE TABLE code_slots (token TEXT PRIMARY KEY, instance TEXT, session TEXT, "
+                   "execution_id TEXT, created REAL, phase TEXT, result TEXT, owner TEXT, heartbeat REAL)")
+        db.execute("INSERT INTO code_slots VALUES ('t','unity','s','old',1,'reconciling',NULL,'o',0)")
+    store = SlotStore(path)
+    slot, fresh = store.admit("unity", "A", "new")
+    assert not fresh and slot.execution_id == "old" and slot.fingerprint is None

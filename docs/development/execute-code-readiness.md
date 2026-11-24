@@ -89,29 +89,55 @@ execution deadlines remain separate client capabilities.
 
 ## Unity journal and recovery
 
-`Library/MCPForUnity/command-executions.json` remains the execution journal.
-Admission is persisted before dispatch. IDs and fingerprints retain their existing
-replay protection. Complete responses are retained for the latest 64 eligible
-completions, up to 256 Ki-characters each. Journal storage errors block execution.
+Unity is one stateful process. Compilation, domain reload (script changes, and
+entering Play Mode when domain reload is enabled), Play Mode changes, imports and
+player builds are transitions. A domain reload unloads every managed object,
+including queued commands and the WebSocket that carried them, so a send can be
+lost without any answer.
 
-After a failed response wait or reconnect, Python queries
-`execute_code(action="get_execution_status", execution_id=...)`. Its internal
-`settle_unstarted=true` option atomically settles an absent or queued execution as
-`not_started`. An absent ID receives a durable tombstone; a delayed send cannot
-admit it afterward. Settling an already running/unknown execution leaves it active.
-The public status query keeps its existing read-only behavior without that option.
+The execution journal lives in `SessionState`, which survives assembly reloads and
+is cleared when the Editor exits (the lifetime of the process). Admission, status
+and cancellation run on transport threads and only change memory. The main thread
+writes the journal: `running` is written before the handler starts (a write failure
+refuses the start), and other changes are flushed on the next Editor tick and in
+`beforeAssemblyReload`. A failed write is retried on the next flush; it never
+disables execution. The journal keeps 512 settled entries and the latest 16
+responses (up to 256 Ki-characters each, stored under separate keys). The former
+`Library/MCPForUnity/command-executions.json` file journal is deleted on load: whole
+file rewrites with `File.Replace` failed under Windows sharing violations right
+after a reload and then blocked execution for the rest of the domain.
 
-- A completed journal entry supplies its stored result and releases the slot.
-- A settled unstarted entry releases it with `execution_not_started`.
-- Running/unknown entries retain it and continue reconciliation.
-- A new Unity process or AppDomain marks discarded queued work `not_started` and
-  work that had started `interrupted`. Old-domain tasks have ended; their IDs stay
-  reserved. Reconciliation releases these slots with `execution_interrupted`.
+Every send carries an `attempt` number that increases across workers and server
+restarts. After a lost answer Python queries
+`execute_code(action="get_execution_status", execution_id=..., settle_unstarted=true,
+settle_attempt=N, admitted_at_unix_ms=T)`:
 
-Transport unresponsiveness alone never changes those journal states. Recovery
-operations remain eligible while a code slot is occupied. Unity processes their
-existing command queues when its main thread can service them. Install the matching
-Python server and Unity package when deploying this protocol.
+- `completed` supplies the stored result.
+- `not_started`: attempts up to N can never start (a delayed copy is refused). The
+  worker waits for readiness again and sends the same request as a later attempt,
+  within the idle timeout.
+- `interrupted`: the handler started but its domain ended.
+- `lost`: the ID is unknown to a process that started after `T`, so an earlier
+  Editor process may have received it. Reported, never guessed.
+- `running`/`unknown`: the execution is live; reconciliation continues.
+
+Without a definitive state for `UNITY_MCP_CODE_RECONCILE_SECONDS` (default 300;
+disconnects and stateless errors count, live executions do not), the slot is
+released with `execution_result_unknown` instead of blocking every session. A worker
+taking over an abandoned slot does not know earlier attempts and settles them all.
+
+Unity forgets executions when the Editor restarts, so the server keeps replay
+protection: a repeated execution ID whose stored result may have run returns that
+result without sending, and a different request under the same ID is refused with
+`execution_id_conflict`. Stored results that prove nothing ran (idle timeout,
+`not_started`) do not block a new run.
+
+A player build holds the main thread. The plugin marks it from
+`IPreprocessBuildWithReport` and answers `get_editor_state` from the transport
+thread with `build.is_building_player`, which blocks code dispatch as the
+`player_build` transition; the mark clears on the first Editor tick with no build
+running (post-build callbacks do not run for failed builds). A modal dialog still
+leaves probes unanswered and is reported as `editor_unresponsive`.
 
 ## Client configuration
 

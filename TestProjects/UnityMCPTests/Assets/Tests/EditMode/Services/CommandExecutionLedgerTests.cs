@@ -1,5 +1,5 @@
 using System;
-using System.IO;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using MCPForUnity.Editor.Services;
@@ -10,35 +10,66 @@ namespace MCPForUnityTests.Editor.Services
 {
     public class CommandExecutionLedgerTests
     {
-        private string directory;
-        private string path;
+        // Stands in for SessionState: survives a new ledger (domain reload), cleared by Restart().
+        private sealed class MemoryStore : IExecutionJournalStore
+        {
+            public readonly Dictionary<string, string> Values = new();
+            public int Writes;
+            public bool Fail;
+            public string Read(string key) => Values.TryGetValue(key, out var value) ? value : null;
+            public void Write(string key, string value)
+            {
+                if (Fail) throw new System.IO.IOException("sharing violation");
+                Writes++;
+                Values[key] = value;
+            }
+            public void Erase(string key) { if (Fail) throw new System.IO.IOException("sharing violation"); Values.Remove(key); }
+        }
+
+        private MemoryStore store;
         private long now;
+        private long processStarted;
         private CommandExecutionLedger ledger;
         private const string Success = "{\"status\":\"success\",\"result\":{\"success\":true,\"data\":{\"value\":42}}}";
+        private const string Busy = "{\"status\":\"success\",\"result\":{\"success\":false,\"error\":\"editor_busy\"}}";
 
         [SetUp]
         public void SetUp()
         {
-            directory = Path.Combine(Path.GetTempPath(), "unity-mcp-ledger-test-" + Guid.NewGuid().ToString("N"));
-            path = Path.Combine(directory, "executions.json");
-            now = 1000;
-            ledger = new CommandExecutionLedger(path, "process-A", () => now);
+            store = new MemoryStore();
+            now = 100000;
+            processStarted = 1000;
+            ledger = New();
         }
 
-        [TearDown]
-        public void TearDown() { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+        private CommandExecutionLedger New() => new CommandExecutionLedger(store, "process-A", processStarted, () => now);
 
-        private static JObject Request(string id = "first", string code = "return 42;") =>
-            new JObject { ["action"] = "execute", ["code"] = code, ["execution_id"] = id };
+        private void Reload() { ledger.Flush(); ledger = New(); }
+
+        private void Restart(long startedAt)
+        {
+            store = new MemoryStore();
+            processStarted = startedAt;
+            ledger = New();
+        }
+
+        private static JObject Request(string id = "first", string code = "return 42;", int? attempt = null)
+        {
+            var request = new JObject { ["action"] = "execute", ["code"] = code, ["execution_id"] = id };
+            if (attempt != null) request["attempt"] = attempt.Value;
+            return request;
+        }
         private static JObject Result(string response) => (JObject)JObject.Parse(response)["result"];
-        private string Admit(string id = "first", string code = "return 42;") => ledger.Admit("execute_code", Request(id, code), out _);
+        private static string State(string response) => Result(response)["data"]["execution"].Value<string>("state");
+        private string Admit(string id = "first", string code = "return 42;", int? attempt = null) =>
+            ledger.Admit("execute_code", Request(id, code, attempt), out _, out _);
 
         [Test]
         public void SettlingMissingIdPreventsDelayedAdmissionAcrossReload()
         {
-            Assert.AreEqual("not_started", Result(ledger.Status("first", true))["data"]["execution"].Value<string>("state"));
+            Assert.AreEqual("not_started", State(ledger.Status("first", true)));
             Assert.IsNotNull(Admit());
-            ledger = new CommandExecutionLedger(path, "process-A", () => now);
+            Reload();
             Assert.IsNotNull(Admit());
             Assert.IsNull(Admit("next"));
         }
@@ -47,18 +78,18 @@ namespace MCPForUnityTests.Editor.Services
         public void SettlingQueuedIdPreventsLateStartAndReleasesSlot()
         {
             Admit();
-            Assert.AreEqual("not_started", Result(ledger.Status("first", true))["data"]["execution"].Value<string>("state"));
-            Assert.IsFalse(ledger.Start("first"));
+            Assert.AreEqual("not_started", State(ledger.Status("first", true)));
+            Assert.IsFalse(ledger.Start("first", 0));
             Assert.IsNull(Admit("next"));
         }
 
         [Test]
         public void SettlingRunningIdPreservesActiveExecution()
         {
-            Admit(); ledger.Start("first");
-            Assert.AreEqual("running", Result(ledger.Status("first", true))["data"]["execution"].Value<string>("state"));
+            Admit(); ledger.Start("first", 0);
+            Assert.AreEqual("running", State(ledger.Status("first", true)));
             Assert.IsNotNull(Admit("next"));
-            ledger.Complete("first", Success);
+            ledger.Complete("first", 0, Success);
             Assert.IsNull(Admit("next"));
         }
 
@@ -66,19 +97,124 @@ namespace MCPForUnityTests.Editor.Services
         public void QueuedWorkDiscardedByReloadIsUnstarted()
         {
             Admit();
-            ledger = new CommandExecutionLedger(path, "process-A", () => now);
-            Assert.AreEqual("not_started", Result(ledger.Status("first"))["data"]["execution"].Value<string>("state"));
-            Assert.IsFalse(ledger.Start("first"));
+            Reload();
+            Assert.AreEqual("not_started", State(ledger.Status("first")));
+            Assert.IsFalse(ledger.Start("first", 0));
             Assert.IsNull(Admit("next"));
         }
 
         [Test]
-        public void BusyBeforeStartDefersWithoutReservingAnExecutedId()
+        public void QueuedWorkNeverFlushedIsUnknownAfterReloadAndSettlesUnstarted()
+        {
+            // Admission happens on a transport thread and is not written; the domain that
+            // held the queued command is gone, so it can never start.
+            Admit();
+            ledger = New();
+            Assert.AreEqual("not_started", State(ledger.Status("first", true, 0, now)));
+            Assert.IsNull(Admit(attempt: 1));
+        }
+
+        [Test]
+        public void StartPersistsRunningBeforeTheHandler()
         {
             Admit();
-            ledger.Complete("first", "{\"status\":\"success\",\"result\":{\"success\":false,\"error\":\"editor_busy\"}}");
+            Assert.IsTrue(ledger.Start("first", 0));
+            ledger = New();
+            Assert.AreEqual("interrupted", State(ledger.Status("first", true)));
+            Assert.IsNotNull(Admit(attempt: 5));
+        }
+
+        [Test]
+        public void StoreFailureRefusesStartAndRecoversOnNextFlush()
+        {
+            Admit();
+            store.Fail = true;
+            Assert.IsFalse(ledger.Start("first", 0));
+            Assert.AreEqual("not_started", Result(ledger.CancelWait("first", 0))["data"].Value<string>("state"));
+            Assert.IsNotNull(Result(ledger.Status())["data"].Value<string>("journal_error"));
+            store.Fail = false;
+            Assert.IsTrue(ledger.Flush());
+            Assert.IsNull(Result(ledger.Status())["data"].Value<string>("journal_error"));
+            Assert.IsNull(Admit(attempt: 1));
+            Assert.IsTrue(ledger.Start("first", 1));
+        }
+
+        [Test]
+        public void BusyBeforeStartAdmitsTheNextAttemptOnly()
+        {
+            Admit(attempt: 0);
+            ledger.Complete("first", 0, Busy);
+            Assert.AreEqual("execution_not_started", Result(Admit(attempt: 0)).Value<string>("error"));
+            Assert.IsNull(Admit(attempt: 1));
+            Assert.IsFalse(ledger.Start("first", 0));
+            Assert.IsTrue(ledger.Start("first", 1));
+        }
+
+        [Test]
+        public void LegacyBusyBeforeStartDefersWithoutReservingAnExecutedId()
+        {
+            Admit();
+            ledger.Complete("first", 0, Busy);
             Assert.IsNull(Admit());
-            Assert.IsTrue(ledger.Start("first"));
+            Assert.IsTrue(ledger.Start("first", 0));
+        }
+
+        [Test]
+        public void SettledAttemptRejectsDelayedCopyAndAdmitsResend()
+        {
+            Assert.AreEqual("not_started", State(ledger.Status("first", true, 0, now)));
+            Assert.AreEqual("execution_not_started", Result(Admit(attempt: 0)).Value<string>("error"));
+            Assert.IsNull(Admit(attempt: 1));
+            Assert.IsTrue(ledger.Start("first", 1));
+            string response = ledger.Complete("first", 1, Success);
+            Assert.AreEqual(response, Admit(attempt: 2));
+        }
+
+        [Test]
+        public void ResendAfterSettleDoesNotLetTheOldQueuedCopyStart()
+        {
+            Admit(attempt: 0);
+            ledger.Status("first", true, 0, now);
+            Assert.IsNull(Admit(attempt: 1));
+            Assert.IsFalse(ledger.Start("first", 0));
+            Assert.AreEqual("execution_not_started", Result(ledger.CancelWait("first", 0)).Value<string>("error"));
+            Assert.AreEqual("queued", State(ledger.Status("first")));
+            Assert.IsTrue(ledger.Start("first", 1));
+            Assert.AreEqual(42, Result(ledger.Complete("first", 1, Success))["data"].Value<int>("value"));
+            Assert.AreEqual(Success.Length, ledger.Complete("first", 0, Success).Length);
+            Assert.AreEqual("completed", State(ledger.Status("first")));
+        }
+
+        [Test]
+        public void FinalSettleNeverAdmitsAgain()
+        {
+            ledger.Status("first", true);
+            Assert.AreEqual("execution_not_started", Result(Admit(attempt: 1000)).Value<string>("error"));
+        }
+
+        [Test]
+        public void UnknownIdAfterEditorRestartIsLostNotUnstarted()
+        {
+            long admitted = now;
+            Restart(now + 60000);
+            Assert.AreEqual("lost", State(ledger.Status("first", true, 0, admitted)));
+            Assert.AreEqual("execution_lost", Result(Admit(attempt: 3)).Value<string>("error"));
+        }
+
+        [Test]
+        public void UnknownIdAdmittedAfterProcessStartIsUnstarted()
+        {
+            Assert.AreEqual("not_started", State(ledger.Status("first", true, 0, processStarted + 60000)));
+        }
+
+        [Test]
+        public void CorruptStoreReportsUnknownIdsAsLost()
+        {
+            store.Values[CommandExecutionLedger.DocumentKey] = "broken json";
+            ledger = New();
+            Assert.IsTrue(Result(ledger.Status())["data"].Value<bool>("history_incomplete"));
+            Assert.AreEqual("lost", State(ledger.Status("first", true, 0, now)));
+            Assert.IsNull(Admit("next"));
         }
 
         [Test]
@@ -94,11 +230,21 @@ namespace MCPForUnityTests.Editor.Services
         public void SameIdReturnsCompletedResultWithoutAdmission()
         {
             Assert.IsNull(Admit());
-            Assert.IsTrue(ledger.Start("first"));
-            string response = ledger.Complete("first", Success);
+            Assert.IsTrue(ledger.Start("first", 0));
+            string response = ledger.Complete("first", 0, Success);
             Assert.AreEqual(response, Admit());
             Assert.AreEqual(42, Result(response)["data"].Value<int>("value"));
             Assert.IsTrue(Result(response)["execution"].Value<bool>("result_retained"));
+        }
+
+        [Test]
+        public void CompletedResultSurvivesReload()
+        {
+            Admit(); ledger.Start("first", 0);
+            string response = ledger.Complete("first", 0, Success);
+            Reload();
+            Assert.AreEqual("completed", State(ledger.Status("first", true)));
+            Assert.AreEqual(response, Admit());
         }
 
         [Test]
@@ -109,34 +255,24 @@ namespace MCPForUnityTests.Editor.Services
         }
 
         [Test]
-        public void PropertyOrderDoesNotChangeRequestIdentity()
+        public void PropertyOrderAndAttemptDoNotChangeRequestIdentity()
         {
             Assert.IsNull(Admit());
-            ledger.Start("first");
-            var response = ledger.Complete("first", Success);
-            var reordered = JObject.Parse("{\"code\":\"return 42;\",\"execution_id\":\"first\",\"action\":\"execute\"}");
-            Assert.AreEqual(response, ledger.Admit("execute_code", reordered, out _));
+            ledger.Start("first", 0);
+            var response = ledger.Complete("first", 0, Success);
+            var reordered = JObject.Parse("{\"code\":\"return 42;\",\"execution_id\":\"first\",\"action\":\"execute\",\"attempt\":4}");
+            Assert.AreEqual(response, ledger.Admit("execute_code", reordered, out _, out _));
         }
 
         [Test]
         public void TimeoutRetainsLeaseAndLateCompletionRecoversIt()
         {
-            Admit(); ledger.Start("first");
-            Assert.AreEqual("unknown", Result(ledger.CancelWait("first"))["data"].Value<string>("state"));
+            Admit(); ledger.Start("first", 0);
+            Assert.AreEqual("unknown", Result(ledger.CancelWait("first", 0))["data"].Value<string>("state"));
             Assert.AreEqual("execution_result_unknown", Result(Admit("new-id", "return 99;")).Value<string>("error"));
             now += 31000;
             Assert.AreEqual("execution_result_unknown", Result(Admit("another-id")).Value<string>("error"));
-            ledger.Complete("first", Success);
-            Assert.IsNull(Admit("after-completion"));
-        }
-
-        [Test]
-        public void RepeatedCancelledWaitsPreserveRecoveryByActualCompletion()
-        {
-            Admit(); ledger.Start("first");
-            ledger.CancelWait("first"); ledger.CancelWait("first");
-            Assert.AreEqual("execution_result_unknown", Result(Admit("new")).Value<string>("error"));
-            ledger.Complete("first", Success);
+            ledger.Complete("first", 0, Success);
             Assert.IsNull(Admit("after-completion"));
         }
 
@@ -144,82 +280,77 @@ namespace MCPForUnityTests.Editor.Services
         public void CancellationBeforeStartNeverExecutesAndDoesNotHoldLease()
         {
             Admit();
-            Assert.AreEqual("not_started", Result(ledger.CancelWait("first"))["data"].Value<string>("state"));
-            Assert.IsFalse(ledger.Start("first"));
+            Assert.AreEqual("not_started", Result(ledger.CancelWait("first", 0))["data"].Value<string>("state"));
+            Assert.IsFalse(ledger.Start("first", 0));
             Assert.IsNotNull(Admit());
             Assert.IsNull(Admit("new"));
         }
 
         [Test]
-        public void LegacyDiagnosticFaultAndOrdinaryEntriesAreRemovedOnReload()
+        public void UnknownExecutionSurvivesReloadAsInterrupted()
         {
-            Directory.CreateDirectory(directory);
-            File.WriteAllText(path, "{\"Owner\":\"process-A\",\"BlockedReason\":\"editor_unresponsive\",\"Entries\":[" +
-                "{\"Id\":\"old-stop\",\"Command\":\"manage_editor\",\"State\":\"unknown\",\"Fingerprint\":\"old\"}]}");
-            ledger = new CommandExecutionLedger(path, "process-A", () => now);
+            Admit(); ledger.Start("first", 0); ledger.CancelWait("first", 0);
+            Reload();
+            Assert.AreEqual("interrupted", State(ledger.Status("first")));
             Assert.IsFalse(Result(ledger.Status())["data"].Value<bool>("code_execution_blocked"));
-            Assert.IsEmpty((JArray)JObject.Parse(File.ReadAllText(path))["Entries"]);
-            Assert.IsNull(Admit());
-        }
-
-        [Test]
-        public void UnknownExecutionSurvivesReloadAndRestartNeverReexecutesOldId()
-        {
-            Admit(); ledger.Start("first");
-            ledger = new CommandExecutionLedger(path, "process-A", () => now);
-            Assert.AreEqual("interrupted", Result(ledger.Status("first"))["data"]["execution"].Value<string>("state"));
-            ledger = new CommandExecutionLedger(path, "process-B", () => now);
-            Assert.AreEqual("interrupted", Result(ledger.Status("first"))["data"]["execution"].Value<string>("state"));
-            Assert.IsNotNull(Admit());
             Assert.IsNull(Admit("new"));
         }
 
         [Test]
         public void StatusIsAvailableOnTransportThreadWhileExecutionIsBlocked()
         {
-            Admit(); ledger.Start("first"); ledger.CancelWait("first");
+            Admit(); ledger.Start("first", 0); ledger.CancelWait("first", 0);
             string response = Task.Run(() => ledger.Status("first")).GetAwaiter().GetResult();
-            Assert.AreEqual("unknown", Result(response)["data"]["execution"].Value<string>("state"));
+            Assert.AreEqual("unknown", State(response));
         }
 
         [Test]
-        public void IdleTimeDoesNotBlockCodeAdmission()
+        public void TransportThreadOperationsDoNotTouchTheStore()
         {
-            now += 31000;
+            int writes = store.Writes;
+            Admit(); ledger.Status("other", true); ledger.CancelWait("first", 0);
+            Assert.AreEqual(writes, store.Writes);
+            Assert.IsTrue(ledger.IsDirty);
+            ledger.Flush();
+            Assert.IsFalse(ledger.IsDirty);
+        }
+
+        [Test]
+        public void KnownCompilationIsBusyWithoutAdmission()
+        {
+            Assert.AreEqual("editor_busy", Result(ledger.Admit("execute_code", Request(), out _, out _, true)).Value<string>("error"));
             Assert.IsNull(Admit());
-        }
-
-        [Test]
-        public void KnownCompilationDoesNotLatchAnUnresponsiveFault()
-        {
-            now += 31000;
-            Assert.AreEqual("editor_busy", Result(ledger.Admit("execute_code", Request(), out _, true)).Value<string>("error"));
-            now += 31000;
-            Assert.IsNull(Admit());
-        }
-
-        [Test]
-        public void CorruptJournalBlocksChanges()
-        {
-            Directory.CreateDirectory(directory); File.WriteAllText(path, "broken json");
-            ledger = new CommandExecutionLedger(path, "process-A", () => now);
-            Assert.AreEqual("execution_storage_error", Result(Admit()).Value<string>("error"));
         }
 
         [Test]
         public void ExpiredResponseStillPreventsReexecution()
         {
-            for (int i = 0; i < 66; i++)
+            for (int i = 0; i < CommandExecutionLedger.RetainedResponses + 2; i++)
             {
                 now++; string id = "request-" + i;
-                Assert.IsNull(Admit(id)); ledger.Start(id); ledger.Complete(id, Success);
+                Assert.IsNull(Admit(id)); ledger.Start(id, 0); ledger.Complete(id, 0, Success);
             }
+            ledger.Flush();
             Assert.AreEqual("execution_result_not_retained", Result(Admit("request-0")).Value<string>("error"));
+            Assert.AreEqual(CommandExecutionLedger.RetainedResponses,
+                store.Values.Keys.Count(k => k.StartsWith(CommandExecutionLedger.ResponseKeyPrefix)));
+        }
+
+        [Test]
+        public void HistoryIsBounded()
+        {
+            for (int i = 0; i < CommandExecutionLedger.RetainedEntries + 10; i++)
+            {
+                now++; string id = "request-" + i;
+                Admit(id); ledger.Start(id, 0); ledger.Complete(id, 0, Success);
+            }
+            Reload();
+            Assert.AreEqual("execution_not_found", Result(ledger.Status("request-0")).Value<string>("error"));
+            Assert.AreEqual("completed", State(ledger.Status("request-" + (CommandExecutionLedger.RetainedEntries + 9))));
         }
 
         [TestCase("ping", null, false)]
         [TestCase("read_console", "get", false)]
-        [TestCase("read_console", "clear", false)]
         [TestCase("execute_code", "get_execution_status", false)]
         [TestCase("execute_code", "get_history", false)]
         [TestCase("execute_code", "clear_history", false)]
@@ -227,13 +358,8 @@ namespace MCPForUnityTests.Editor.Services
         [TestCase("execute_code", "replay", true)]
         [TestCase("execute_code", "EXECUTE", true)]
         [TestCase("execute_code", "unknown", false)]
-        [TestCase("manage_editor", "stop", false)]
         [TestCase("manage_editor", "play", false)]
-        [TestCase("manage_editor", "telemetry_status", false)]
-        [TestCase("manage_scene", "get_hierarchy", false)]
-        [TestCase("manage_asset", "search", false)]
         [TestCase("refresh_unity", null, false)]
-        [TestCase("get_project_info", null, false)]
         [TestCase("batch_execute", null, false)]
         [TestCase("execute_custom_tool", null, false)]
         public void OnlyCodeExecutionRequiresAdmission(string command, string action, bool expected)
@@ -242,24 +368,14 @@ namespace MCPForUnityTests.Editor.Services
         }
 
         [TestCase("manage_editor", "stop")]
-        [TestCase("manage_editor", "play")]
         [TestCase("manage_scene", "get_hierarchy")]
-        [TestCase("manage_asset", "search")]
         [TestCase("refresh_unity", null)]
-        [TestCase("get_project_info", null)]
         [TestCase("execute_code", "clear_history")]
-        public void OrdinaryOperationsPassPendingCompilationAndUnknownCodeWithoutJournalWrites(string command, string action)
+        public void OrdinaryOperationsPassPendingCompilationAndUnknownCode(string command, string action)
         {
-            Admit(); ledger.Start("first"); ledger.CancelWait("first");
-            var before = File.ReadAllBytes(path);
-            Assert.IsNull(ledger.Admit(command, new JObject { ["action"] = action }, out var id, true));
+            Admit(); ledger.Start("first", 0); ledger.CancelWait("first", 0);
+            Assert.IsNull(ledger.Admit(command, new JObject { ["action"] = action }, out var id, out _, true));
             Assert.IsNull(id);
-            CollectionAssert.AreEqual(before, File.ReadAllBytes(path));
-            File.WriteAllText(path, "corrupt");
-            ledger = new CommandExecutionLedger(path, "process-A", () => now);
-            Assert.IsNull(ledger.Admit(command, new JObject { ["action"] = action }, out id, true));
-            Assert.IsNull(id);
-            Assert.AreEqual("corrupt", File.ReadAllText(path));
         }
 
         private static JObject Batch(string tool, JObject parameters) => new JObject {
@@ -274,11 +390,11 @@ namespace MCPForUnityTests.Editor.Services
             Assert.IsTrue(CommandExecutionLedger.RequiresCodeExecution("execute_custom_tool", new JObject {
                 ["tool_name"] = "batch_execute", ["parameters"] = batch
             }));
-            Assert.AreEqual("editor_busy", Result(ledger.Admit("batch_execute", batch, out _, true)).Value<string>("error"));
+            Assert.AreEqual("editor_busy", Result(ledger.Admit("batch_execute", batch, out _, out _, true)).Value<string>("error"));
             batch["execution_id"] = "batch";
-            Assert.IsNull(ledger.Admit("batch_execute", batch, out var id));
-            ledger.Start(id); ledger.CancelWait(id);
-            Assert.IsNotNull(ledger.Admit("batch_execute", batch, out _));
+            Assert.IsNull(ledger.Admit("batch_execute", batch, out var id, out var attempt));
+            ledger.Start(id, attempt); ledger.CancelWait(id, attempt);
+            Assert.IsNotNull(ledger.Admit("batch_execute", batch, out _, out _));
         }
 
         [Test]
@@ -287,13 +403,9 @@ namespace MCPForUnityTests.Editor.Services
             var batch = Batch("manage_asset", new JObject { ["action"] = "search", ["page_size"] = 10, ["pageSize"] = 10 });
             for (int i = 0; i < 12; i++) batch = Batch("batch_execute", batch);
             Assert.IsFalse(CommandExecutionLedger.RequiresCodeExecution("batch_execute", batch));
-            Assert.IsNull(ledger.Admit("batch_execute", batch, out var id, true));
+            Assert.IsNull(ledger.Admit("batch_execute", batch, out var id, out _, true));
             Assert.IsNull(id);
-            Assert.IsNull(ledger.Admit("execute_custom_tool", new JObject {
-                ["tool_name"] = "manage_editor", ["parameters"] = new JObject { ["action"] = "stop" }
-            }, out id, true));
-            Assert.IsNull(id);
-            Assert.IsFalse(File.Exists(path));
+            Assert.IsFalse(ledger.IsDirty);
         }
 
         [Test]

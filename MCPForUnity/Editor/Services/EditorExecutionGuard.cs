@@ -23,8 +23,12 @@ namespace MCPForUnity.Editor.Services
         private static bool _compileHadErrors;
         private static int _editorAssembliesCompiled;
         private static bool _changingPlayMode;
+        private static volatile bool _buildingPlayer;
+        private static long _buildStartedUnixMs;
 
         internal static bool CompilationPending => Gate.CompilationPending;
+        // Readable from transport threads while a player build holds the main thread.
+        internal static bool IsBuildingPlayer => _buildingPlayer;
         internal static bool CompilationFailed => Gate.CompilationFailed;
         internal static bool IsChangingPlayMode => _changingPlayMode ||
             EditorApplication.isPlaying != EditorApplication.isPlayingOrWillChangePlaymode;
@@ -64,7 +68,34 @@ namespace MCPForUnity.Editor.Services
             EditorApplication.playModeStateChanged += state =>
                 _changingPlayMode = state == PlayModeStateChange.ExitingEditMode
                     || state == PlayModeStateChange.ExitingPlayMode;
+            // Post-process callbacks are not a reliable end signal (a failed build skips them);
+            // the main thread ticking again with no build running is.
+            EditorApplication.update += () =>
+            {
+                if (_buildingPlayer && !BuildPipeline.isBuildingPlayer) _buildingPlayer = false;
+            };
         }
+
+        internal static void PlayerBuildStarted()
+        {
+            _buildStartedUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _buildingPlayer = true;
+        }
+
+        internal static string BuildingPlayerState() => Newtonsoft.Json.JsonConvert.SerializeObject(new
+        {
+            status = "success",
+            result = new
+            {
+                success = true,
+                data = new
+                {
+                    observed_at_unix_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    build = new { is_building_player = true, started_at_unix_ms = _buildStartedUnixMs },
+                    execution = new { is_running = Gate.Active != null }
+                }
+            }
+        });
 
         // Editor assemblies are written to Library/ScriptAssemblies. Player builds compile into
         // other folders (PlayerScriptAssemblies, Bee artifacts) and never reload the Editor domain.
@@ -141,5 +172,28 @@ namespace MCPForUnity.Editor.Services
             retry_after_ms = 500,
             execution_started = false
         });
+    }
+
+    internal sealed class PlayerBuildExecutionGuard : UnityEditor.Build.IPreprocessBuildWithReport
+    {
+        public int callbackOrder => int.MinValue;
+
+        public void OnPreprocessBuild(UnityEditor.Build.Reporting.BuildReport report) =>
+            EditorExecutionGuard.PlayerBuildStarted();
+    }
+
+    // SessionState survives assembly reloads and is cleared when the Editor exits, which is
+    // exactly the lifetime of the execution ledger. Main thread only.
+    internal sealed class SessionStateJournalStore : IExecutionJournalStore
+    {
+        public string Read(string key)
+        {
+            string value = SessionState.GetString(key, null);
+            return string.IsNullOrEmpty(value) ? null : value;
+        }
+
+        public void Write(string key, string value) => SessionState.SetString(key, value);
+
+        public void Erase(string key) => SessionState.EraseString(key);
     }
 }

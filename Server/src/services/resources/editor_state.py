@@ -212,7 +212,10 @@ def _enrich_advice_and_staleness(state_v2: dict[str, Any]) -> dict[str, Any]:
         blocking.append("running_tests")
     if refresh.get("is_refresh_in_progress") is True:
         blocking.append("asset_refresh")
-    if is_stale:
+    # A player build holds the main thread; the plugin answers this probe off-thread.
+    if (state_v2.get("build") or {}).get("is_building_player") is True:
+        blocking.append("player_build")
+    if is_stale and "player_build" not in blocking:
         blocking.append("stale_status")
 
     # The additional execute_code gates have their own advice scope. Recovery

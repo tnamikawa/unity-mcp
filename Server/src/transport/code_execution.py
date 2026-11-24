@@ -1,12 +1,25 @@
 """One durable admission slot per Unity; only Python waits for readiness/results.
 
 The database coordinates HTTP and separate stdio server processes. It contains
-ownership and results, never submitted source. Unity's journal remains authoritative
-after a transport failure. Worker tasks outlive individual MCP requests.
+ownership, request fingerprints and results, never submitted source. Worker tasks
+outlive individual MCP requests.
+
+Unity is one stateful process that passes through transitions (compilation, domain
+reload, play mode changes, player builds, imports). A domain reload discards every
+queued command and the socket that carried it, so a send can be lost without an
+answer. The worker therefore:
+
+- sends only after a readiness probe reports no transition,
+- numbers every send of an execution ID ("attempt"),
+- after a lost answer asks Unity to settle the ID; an unstarted attempt is then
+  rejected forever by Unity and the same request is sent again as a later attempt,
+- gives up reconciliation after a bounded time without a definitive answer,
+  releasing the slot with an explicit unknown result instead of holding it.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -22,6 +35,13 @@ from models.unity_response import normalize_unity_response
 
 log = logging.getLogger(__name__)
 Send = Callable[[str, dict], Awaitable[dict]]
+
+# Attempts must increase across workers and server restarts for the same execution ID:
+# seconds since 2026-01-01 UTC, bumped by one when sends follow within a second.
+ATTEMPT_EPOCH = 1767225600
+UNCERTAIN_ERRORS = {"execution_result_unknown", "code_transport_unavailable", "unity_session_unavailable",
+                    "unity_connection_unavailable", "execution_in_progress"}
+LIVE_STATES = {"running", "queued", "unknown"}
 
 
 def response(value):
@@ -47,6 +67,25 @@ def without_retry(value, *, _in_data=False):
             and not (k == "hint" and v == "retry")}
 
 
+def fingerprint(command: str, params: dict | None) -> str:
+    request = {k: v for k, v in (params or {}).items() if k not in {"execution_id", "attempt"}}
+    text = json.dumps([command, request], sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def never_executed(result: dict | None) -> bool:
+    """True when a stored result proves the request did not run in Unity."""
+    if not isinstance(result, dict) or result.get("success") is not False:
+        return False
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    return data.get("execution_started") is False or data.get("state") in {"not_started", "not_sent"}
+
+
+def next_attempt(previous: int | None) -> int:
+    now = int(time.time()) - ATTEMPT_EPOCH
+    return now if previous is None else max(previous + 1, now)
+
+
 @dataclass
 class Slot:
     token: str
@@ -58,6 +97,10 @@ class Slot:
     result: dict | None = None
     owner: str = ""
     heartbeat: float = 0.
+    fingerprint: str | None = None
+
+
+COLUMNS = "token, instance, session, execution_id, created, phase, result, owner, heartbeat, fingerprint"
 
 
 class SlotStore:
@@ -70,9 +113,17 @@ class SlotStore:
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS code_slots ("
                        "token TEXT PRIMARY KEY, instance TEXT, session TEXT, "
-                       "execution_id TEXT, created REAL, phase TEXT, result TEXT, owner TEXT, heartbeat REAL)")
+                       "execution_id TEXT, created REAL, phase TEXT, result TEXT, owner TEXT, heartbeat REAL, "
+                       "fingerprint TEXT)")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(code_slots)")}
+            if "fingerprint" not in columns:
+                try:
+                    db.execute("ALTER TABLE code_slots ADD COLUMN fingerprint TEXT")
+                except sqlite3.OperationalError:
+                    pass  # Another server process added it first.
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS active_code_slot "
                        "ON code_slots(instance) WHERE result IS NULL")
+            db.execute("CREATE INDEX IF NOT EXISTS code_slot_execution ON code_slots(instance, execution_id)")
 
     def connect(self):
         return sqlite3.connect(str(self.path), timeout=2)
@@ -83,17 +134,31 @@ class SlotStore:
             return None
         return Slot(*row[:6], json.loads(row[6]) if row[6] else None, *row[7:])
 
-    def admit(self, instance, session, execution_id):
+    def admit(self, instance, session, execution_id, request_fingerprint=None):
+        """Returns (slot, fresh). A finished slot is returned when the same request already ran."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM code_slots WHERE instance=? AND result IS NULL",
+            row = db.execute(f"SELECT {COLUMNS} FROM code_slots WHERE instance=? AND result IS NULL",
                              (instance,)).fetchone()
             if row:
                 return self.slot(row), False
-            slot = Slot(uuid4().hex, instance, session, execution_id, time.time(), "waiting_idle")
-            db.execute("INSERT INTO code_slots VALUES (?,?,?,?,?,?,NULL,?,?)",
+            # Unity forgets executions when the Editor restarts; the server remembers them,
+            # so a repeated execution ID never silently runs a second time.
+            for row in db.execute(f"SELECT {COLUMNS} FROM code_slots WHERE instance=? AND execution_id=? "
+                                  "AND result IS NOT NULL ORDER BY created DESC", (instance, execution_id)):
+                done = self.slot(row)
+                if never_executed(done.result):
+                    continue
+                if done.fingerprint and request_fingerprint and done.fingerprint != request_fingerprint:
+                    done.result = error("execution_id_conflict", execution_id, state="not_started",
+                                        execution_started=False,
+                                        message="This execution ID belongs to a different request.")
+                return done, False
+            slot = Slot(uuid4().hex, instance, session, execution_id, time.time(), "waiting_idle",
+                        owner=self.owner, heartbeat=time.time(), fingerprint=request_fingerprint)
+            db.execute(f"INSERT INTO code_slots ({COLUMNS}) VALUES (?,?,?,?,?,?,NULL,?,?,?)",
                        (slot.token, instance, session, execution_id, slot.created, slot.phase,
-                        self.owner, time.time()))
+                        self.owner, slot.heartbeat, request_fingerprint))
             return slot, True
 
     def claim_abandoned(self, slot):
@@ -109,7 +174,7 @@ class SlotStore:
 
     def get(self, token):
         with self.connect() as db:
-            return self.slot(db.execute("SELECT * FROM code_slots WHERE token=?", (token,)).fetchone())
+            return self.slot(db.execute(f"SELECT {COLUMNS} FROM code_slots WHERE token=?", (token,)).fetchone())
 
     def phase(self, slot, phase):
         with self.connect() as db:
@@ -129,13 +194,17 @@ class SlotStore:
 
 class CodeExecutionCoordinator:
     def __init__(self, store: SlotStore, *, idle_timeout=600., poll_interval=1., progress_interval=12.,
-                 unresponsive_timeout=30., probe_timeout=5.):
+                 unresponsive_timeout=30., probe_timeout=5., reconcile_timeout=300.):
         self.store = store
         self.idle_timeout = idle_timeout
-        # The Editor answers state probes on its main thread. A player build or a modal
-        # dialog blocks that thread; report it instead of waiting the whole idle window.
+        # The Editor answers state probes on its main thread. A modal dialog blocks that
+        # thread; report it instead of waiting the whole idle window. (A player build is
+        # answered off the main thread and waits as an ordinary transition.)
         self.unresponsive_timeout = unresponsive_timeout
         self.probe_timeout = probe_timeout
+        # Longest reconciliation without a definitive answer before the slot is released
+        # with an unknown outcome. A live execution keeps answering and never expires.
+        self.reconcile_timeout = reconcile_timeout
         self.poll_interval = poll_interval
         self.progress_interval = progress_interval
         self.workers: dict[str, asyncio.Task] = {}
@@ -148,7 +217,9 @@ class CodeExecutionCoordinator:
         if not isinstance(session, str) or not session:
             return error("code_execution_session_required", state="not_started")
         execution_id = params.get("execution_id") or uuid4().hex
-        slot, fresh = self.store.admit(instance, session, execution_id)
+        slot, fresh = self.store.admit(instance, session, execution_id, fingerprint(command, params))
+        if slot.result is not None:
+            return slot.result
         if slot.session != session:
             if slot.token not in self.workers and self.store.claim_abandoned(slot):
                 self._start(slot, command, params, send, fresh=False)
@@ -202,9 +273,11 @@ class CodeExecutionCoordinator:
             return error("code_transport_unavailable")
 
     async def _work(self, slot, command, params, send, *, fresh):
+        attempt = None
         try:
             if not fresh:
-                await self._reconcile(slot, send)
+                # Attempts sent by an earlier worker are unknown here: settle them all.
+                await self._reconcile(slot, send, None)
                 return
             deadline = time.monotonic() + self.idle_timeout
             last_answer = time.monotonic()
@@ -232,8 +305,8 @@ class CodeExecutionCoordinator:
                         self.store.finish(slot, error("editor_unresponsive", slot.execution_id,
                                                       state="not_started", execution_started=False,
                                                       unresponsive_seconds=round(silent, 1),
-                                                      hint="Unity's main thread is blocked (player build, "
-                                                           "modal dialog or long import). Nothing was executed."))
+                                                      hint="Unity's main thread is blocked (modal dialog "
+                                                           "or long import). Nothing was executed."))
                         return
                     await asyncio.sleep(min(self.poll_interval, max(0., deadline - time.monotonic())))
                     continue
@@ -243,48 +316,59 @@ class CodeExecutionCoordinator:
                 # enrichment, not part of the Editor's wire response.
                 from services.resources.editor_state import _enrich_advice_and_staleness
                 advice = _enrich_advice_and_staleness(dict(data))["advice"]
-                if state.get("success") and advice.get("ready_for_code_execution") is True:
-                    if time.monotonic() >= deadline:
-                        continue
-                    if not self.store.phase(slot, "running"):
-                        return
-                    result = await self._call(send, command, params)
-                    if result.get("error") == "editor_busy" and not result.get("execution"):
-                        # Unity atomically defers before handler start if readiness
-                        # changed after the probe. Reuse the same admission identity.
-                        self.store.phase(slot, "waiting_idle")
-                        await asyncio.sleep(self.poll_interval)
-                        continue
-                    execution = result.get("execution") or {}
-                    state = (result.get("data") or {}).get("state")
-                    if execution.get("state") == "completed" or (
-                        result.get("error") not in {"execution_result_unknown", "code_transport_unavailable",
-                                                   "unity_session_unavailable", "unity_connection_unavailable",
-                                                   "execution_in_progress"}
-                        and state not in {"not_sent", "unknown", "running", "queued"}
-                    ):
-                        self.store.finish(slot, result)
-                        return
-                    if state == "not_sent":
-                        self.store.phase(slot, "waiting_idle")
-                        continue
-                    await self._reconcile(slot, send)
+                if not (state.get("success") and advice.get("ready_for_code_execution") is True):
+                    await asyncio.sleep(min(self.poll_interval, max(0., deadline - time.monotonic())))
+                    continue
+                if not self.store.phase(slot, "running"):
                     return
-                await asyncio.sleep(min(self.poll_interval, max(0., deadline - time.monotonic())))
+                attempt = next_attempt(attempt)
+                result = await self._call(send, command, dict(params, attempt=attempt))
+                if result.get("error") == "editor_busy" and not result.get("execution"):
+                    # Unity atomically declines before handler start if readiness changed
+                    # after the probe (a transition began). Send again as a later attempt.
+                    self.store.phase(slot, "waiting_idle")
+                    await asyncio.sleep(self.poll_interval)
+                    continue
+                execution = result.get("execution") or {}
+                result_state = (result.get("data") or {}).get("state")
+                if execution.get("state") == "completed" or (
+                    result.get("error") not in UNCERTAIN_ERRORS
+                    and result_state not in {"not_sent", "unknown", "running", "queued"}
+                ):
+                    self.store.finish(slot, result)
+                    return
+                if result_state == "not_sent":
+                    self.store.phase(slot, "waiting_idle")
+                    continue
+                # The answer was lost or the Editor is occupied: settle this attempt.
+                if await self._reconcile(slot, send, attempt) != "not_started":
+                    return
+                if time.monotonic() >= deadline:
+                    self.store.finish(slot, error("execution_not_started", slot.execution_id,
+                                                  state="not_started", execution_started=False))
+                    return
+                # Proven unstarted (for example discarded by a domain reload): wait for the
+                # Editor to settle and send the same request again.
+                self.store.phase(slot, "waiting_idle")
         except asyncio.CancelledError:
             # Server shutdown leaves a durable slot for the next process to reconcile.
             raise
         except Exception:
             log.exception("Code worker failed; preserving admission for journal reconciliation")
-            await self._reconcile(slot, send)
+            await self._reconcile(slot, send, None)
 
-    async def _reconcile(self, slot, send):
+    async def _reconcile(self, slot, send, attempt):
+        """Settle the execution in Unity. With an attempt, returns "not_started" instead of
+        finishing so the caller can send again; otherwise every outcome finishes the slot."""
         self.store.phase(slot, "reconciling")
+        status = {"action": "get_execution_status", "execution_id": slot.execution_id,
+                  "settle_unstarted": True, "admitted_at_unix_ms": int(slot.created * 1000)}
+        if attempt is not None:
+            status["settle_attempt"] = attempt
+        last_definite = time.monotonic()
+        last_error = None
         while True:
-            result = await self._call(send, "execute_code", {
-                "action": "get_execution_status", "execution_id": slot.execution_id,
-                "settle_unstarted": True,
-            })
+            result = await self._call(send, "execute_code", status)
             data = result.get("data") or {}
             execution = data.get("execution") or {}
             state = execution.get("state")
@@ -292,27 +376,47 @@ class CodeExecutionCoordinator:
                 saved = data.get("response")
                 self.store.finish(slot, response(saved) if saved else
                                   error("execution_result_not_retained", slot.execution_id, state=state))
-                return
-            if state in {"not_started", "interrupted"}:
+                return state
+            if state == "not_started" and attempt is not None:
+                return state
+            if state in {"not_started", "interrupted", "lost"}:
+                # lost: an Editor restart ended the process that may have received it.
+                started = {"not_started": False, "interrupted": True, "lost": None}[state]
                 self.store.finish(slot, error("execution_" + state, slot.execution_id,
-                                              state=state, execution_started=state != "not_started"))
-                return
+                                              state=state, execution_started=started))
+                return state
+            if state in LIVE_STATES:
+                # Unity reports the execution itself; its duration is the program's.
+                last_definite = time.monotonic()
+            else:
+                # Disconnected (reload, restart) or an answer without a state.
+                last_error = result.get("error") or "no_execution_state"
+            if time.monotonic() - last_definite >= self.reconcile_timeout:
+                self.store.finish(slot, error(
+                    "execution_result_unknown", slot.execution_id, state="unknown",
+                    last_error=last_error, reconcile_seconds=round(time.monotonic() - last_definite, 1),
+                    hint="Unity gave no definitive state for this execution. The slot was released; "
+                         "inspect the Editor before repeating side effects."))
+                return "unknown"
             await asyncio.sleep(self.poll_interval)
 
 
 _coordinator: CodeExecutionCoordinator | None = None
 
 
+def _positive_env(name: str, default: str) -> float:
+    value = float(os.environ.get(name, default))
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be positive and finite")
+    return value
+
+
 def get_coordinator():
     global _coordinator
     if _coordinator is None:
-        timeout = float(os.environ.get("UNITY_MCP_CODE_IDLE_TIMEOUT_SECONDS", "600"))
-        if not math.isfinite(timeout) or timeout <= 0:
-            raise ValueError("UNITY_MCP_CODE_IDLE_TIMEOUT_SECONDS must be positive and finite")
-        unresponsive = float(os.environ.get("UNITY_MCP_CODE_UNRESPONSIVE_SECONDS", "30"))
-        if not math.isfinite(unresponsive) or unresponsive <= 0:
-            raise ValueError("UNITY_MCP_CODE_UNRESPONSIVE_SECONDS must be positive and finite")
         _coordinator = CodeExecutionCoordinator(
-            SlotStore(Path.home() / ".unity-mcp" / "code-execution-slots.sqlite3"), idle_timeout=timeout,
-            unresponsive_timeout=unresponsive)
+            SlotStore(Path.home() / ".unity-mcp" / "code-execution-slots.sqlite3"),
+            idle_timeout=_positive_env("UNITY_MCP_CODE_IDLE_TIMEOUT_SECONDS", "600"),
+            unresponsive_timeout=_positive_env("UNITY_MCP_CODE_UNRESPONSIVE_SECONDS", "30"),
+            reconcile_timeout=_positive_env("UNITY_MCP_CODE_RECONCILE_SECONDS", "300"))
     return _coordinator
